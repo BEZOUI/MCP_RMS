@@ -1,5 +1,6 @@
 """Baseline comparison methods for the RMS benchmark suite."""
 
+import os
 import random
 from collections import namedtuple
 from copy import deepcopy
@@ -12,6 +13,10 @@ import numpy as np
 from deap import algorithms, base, creator, tools
 
 import logging
+
+
+# Allow libomp/libiomp to coexist when FAISS and PyTorch are both installed.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
 def _load_optional_torch():
