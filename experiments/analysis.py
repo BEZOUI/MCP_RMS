@@ -440,6 +440,99 @@ class ResultsAnalyzer:
 
         return comparison
 
+    def compare_to_reference_algorithms(
+        self,
+        reference_methods: List[str] | None = None,
+        primary_method: str = "adaptive_mcp_rms",
+        metrics: List[str] | None = None,
+        save: bool = True,
+    ) -> pd.DataFrame:
+        """Create a focused comparison against key literature baselines.
+
+        The default configuration matches the three algorithms highlighted in
+        Andersen et al. (2024): a genetic algorithm, simulated annealing, and a
+        reinforcement learning agent. The method summarises absolute and
+        relative differences between the primary approach and each reference
+        algorithm, enabling direct reporting of the study's performance against
+        these canonical RMS optimisation techniques.
+        """
+
+        if self.df.empty:
+            return pd.DataFrame()
+
+        if reference_methods is None:
+            reference_methods = [
+                "genetic_algorithm",
+                "simulated_annealing",
+                "simple_dqn",
+            ]
+
+        if metrics is None:
+            metrics = [
+                "makespan_mean",
+                "tardiness_mean",
+                "time_mean",
+                "success_rate",
+            ]
+
+        available_methods = set(self.df["method"].unique())
+
+        if primary_method not in available_methods:
+            logger.warning("Primary method %s not present in results", primary_method)
+            return pd.DataFrame()
+
+        primary_df = self.df[self.df["method"] == primary_method]
+
+        rows: List[Dict[str, float]] = []
+
+        for method in reference_methods:
+            if method not in available_methods:
+                logger.info("Skipping reference method %s – no results available", method)
+                continue
+
+            ref_df = self.df[self.df["method"] == method]
+            row: Dict[str, float | str] = {
+                "primary_method": primary_method,
+                "reference_method": method,
+            }
+
+            for metric in metrics:
+                if metric not in self.df.columns or (
+                    primary_df[metric].dropna().empty or ref_df[metric].dropna().empty
+                ):
+                    row[f"{metric}_primary"] = np.nan
+                    row[f"{metric}_reference"] = np.nan
+                    row[f"{metric}_diff"] = np.nan
+                    row[f"{metric}_rel_improvement_pct"] = np.nan
+                    continue
+
+                primary_val = float(primary_df[metric].mean())
+                reference_val = float(ref_df[metric].mean())
+
+                row[f"{metric}_primary"] = round(primary_val, 3)
+                row[f"{metric}_reference"] = round(reference_val, 3)
+                row[f"{metric}_diff"] = round(reference_val - primary_val, 3)
+
+                if abs(reference_val) < 1e-9:
+                    rel_improvement = np.nan
+                else:
+                    rel_improvement = 100.0 * (reference_val - primary_val) / abs(reference_val)
+
+                row[f"{metric}_rel_improvement_pct"] = (
+                    round(rel_improvement, 2) if not np.isnan(rel_improvement) else np.nan
+                )
+
+            rows.append(row)
+
+        comparison_df = pd.DataFrame(rows)
+
+        if save and not comparison_df.empty:
+            output_path = self.output_dir / "reference_algorithm_comparison.csv"
+            comparison_df.to_csv(output_path, index=False)
+            logger.info("Saved reference algorithm comparison to %s", output_path)
+
+        return comparison_df
+
     # ------------------------------------------------------------------
     # Report orchestrator
     # ------------------------------------------------------------------
@@ -470,9 +563,11 @@ class ResultsAnalyzer:
         comparison_table = self.create_comparison_table(save=True)
         stats_table = self.statistical_analysis(save=True)
         top_comparisons = self.generate_pairwise_comparisons(top_n=10, save=True)
+        reference_comparison = self.compare_to_reference_algorithms(save=True)
 
         return {
             "comparison_table": comparison_table,
             "statistics": stats_table,
             "top_comparisons": top_comparisons,
+            "reference_comparison": reference_comparison,
         }
