@@ -54,12 +54,21 @@ experiments:
     - "spt"
     - "edd"
     - "mwkr"
+    - "lpt"
+    - "lwkr"
+    - "critical_ratio"
+    - "slack_per_operation"
+    - "random_dispatch"
+    - "apparent_tardiness_cost"
     - "genetic_algorithm"
     - "simulated_annealing"
+    - "simple_dqn"
   
   benchmark_suite: "benchmark_suite"
   
   results_dir: "data/results"
+  simple_dqn_timeout: 900
+  isolate_simple_dqn: true
   
   # Instance sizes to generate
   instance_sizes:
