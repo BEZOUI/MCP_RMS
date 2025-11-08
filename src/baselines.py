@@ -599,43 +599,89 @@ class SimpleDQN:
     def solve(self) -> Dict:
         """Run DQN (simplified - uses random policy as placeholder)"""
         logger.info("Running DQN baseline (simplified)")
-        
-        # For demonstration, use random dispatching
-        # In full implementation, would train neural network
-        
+
+        # For demonstration, use a randomised dispatching policy that still
+        # guarantees progress so experiments never hang. In a full
+        # implementation this is where the DQN policy network would act.
+
         self.env.reset()
-        
+
+        stagnation_steps = 0
+
         while self.env.pending_jobs:
-            # Random action selection
-            job = random.choice(self.env.pending_jobs)
-            
-            for op in job.operations:
-                if hasattr(op, 'completed') and op.completed:
-                    continue
-                
-                # Check precedence
-                can_schedule = all(
-                    hasattr(job.operations[p], 'completed') and job.operations[p].completed
-                    for p in op.precedence
-                )
-                
-                if not can_schedule:
-                    continue
-                
-                # Random compatible machine
-                compatible = [
-                    m.machine_id for m in self.env.machines
-                    if m.can_process(op)
-                ]
-                
-                if compatible:
-                    machine_id = random.choice(compatible)
-                    self.env.assign_operation(
-                        job.job_id,
-                        op.op_id,
-                        machine_id,
-                        self.env.current_time
-                    )
+            schedulable = []
+
+            for job in self.env.pending_jobs:
+                for op in job.operations:
+                    if hasattr(op, "completed") and op.completed:
+                        continue
+
+                    if not all(
+                        hasattr(job.operations[p], "completed") and job.operations[p].completed
+                        for p in op.precedence
+                    ):
+                        continue
+
+                    compatible_machines = [
+                        machine for machine in self.env.machines if machine.can_process(op)
+                    ]
+
+                    if not compatible_machines:
+                        continue
+
+                    machine = min(compatible_machines, key=lambda m: m.next_available_time)
+                    earliest_start = max(self.env.current_time, machine.next_available_time)
+
+                    schedulable.append((job, op, machine, earliest_start))
                     break
-        
+
+            if not schedulable:
+                # Advance time to the next machine availability to avoid infinite loops
+                future_times = [
+                    m.next_available_time for m in self.env.machines
+                    if m.next_available_time > self.env.current_time
+                ]
+
+                if not future_times:
+                    logger.warning("No schedulable operations remaining; terminating early")
+                    break
+
+                next_time = min(future_times)
+                logger.debug("Advancing environment time from %.2f to %.2f to make progress", self.env.current_time, next_time)
+                self.env.current_time = next_time
+                stagnation_steps += 1
+
+                # Fail-safe to prevent edge-case infinite loops
+                if stagnation_steps > 1000:
+                    logger.warning("Exceeded stagnation threshold in SimpleDQN; aborting run")
+                    break
+
+                continue
+
+            job, op, machine, start_time = random.choice(schedulable)
+
+            result = self.env.assign_operation(
+                job.job_id,
+                op.op_id,
+                machine.machine_id,
+                start_time,
+            )
+
+            if result.get("success"):
+                stagnation_steps = 0
+                continue
+
+            logger.debug(
+                "Assignment failed for job %s op %s on machine %s: %s",
+                job.job_id,
+                op.op_id,
+                machine.machine_id,
+                result.get("message", "unknown error"),
+            )
+
+            stagnation_steps += 1
+            if stagnation_steps > 1000:
+                logger.warning("Exceeded stagnation threshold in SimpleDQN after failures; aborting run")
+                break
+
         return self.env.compute_metrics()
