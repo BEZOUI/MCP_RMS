@@ -1,13 +1,16 @@
-"""
-Baseline comparison methods
-Includes dispatching rules, GA, SA, and DRL methods
-"""
+"""Baseline comparison methods for the RMS benchmark suite."""
+
+import random
+from collections import namedtuple
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Callable
-from copy import deepcopy
-import random
-from deap import base, creator, tools, algorithms
+import torch
+import torch.nn as nn
+from deap import algorithms, base, creator, tools
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -590,98 +593,436 @@ class SimulatedAnnealing:
         }
 
 
+Transition = namedtuple(
+    "Transition",
+    ["state", "action", "reward", "next_state", "next_actions", "done"],
+)
+
+
+@dataclass
+class ActionCandidate:
+    """Potential assignment considered by the DQN policy."""
+
+    job: object
+    operation: object
+    machine: object
+    start_time: float
+    processing_time: float
+    features: np.ndarray
+
+
+class ReplayBuffer:
+    """Simple replay buffer for off-policy training."""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.buffer: List[Optional[Transition]] = []
+        self.position = 0
+
+    def push(self, transition: Transition) -> None:
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(None)
+        self.buffer[self.position] = transition
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size: int) -> List[Transition]:
+        return random.sample(self.buffer, batch_size)
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self.buffer)
+
+
+class QNetwork(nn.Module):
+    """Feed-forward network used to approximate Q-values."""
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - thin wrapper
+        return self.model(x).squeeze(-1)
+
+
 class SimpleDQN:
-    """Simplified Deep Q-Network baseline (placeholder)"""
-    
+    """Deep Q-Network baseline with on-the-fly scheduling features."""
+
     def __init__(self, env):
         self.env = env
-    
-    def solve(self) -> Dict:
-        """Run DQN (simplified - uses random policy as placeholder)"""
-        logger.info("Running DQN baseline (simplified)")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # For demonstration, use a randomised dispatching policy that still
-        # guarantees progress so experiments never hang. In a full
-        # implementation this is where the DQN policy network would act.
+        # Hyper-parameters tuned for stability on the benchmark suite
+        self.gamma = 0.95
+        self.learning_rate = 1e-3
+        self.batch_size = 64
+        self.replay_capacity = 50000
+        self.epsilon_start = 1.0
+        self.epsilon_end = 0.05
+        self.epsilon_decay = 0.995
+        self.target_update_interval = 250
+        self.max_idle_advances = 200
+        self.tardiness_weight = 2.0
+        self.energy_weight = 0.1
+        self.completion_bonus = 1.0
 
-        self.env.reset()
+        # Runtime members initialised during solve()
+        self.policy_net: Optional[QNetwork] = None
+        self.target_net: Optional[QNetwork] = None
+        self.optimizer: Optional[torch.optim.Optimizer] = None
+        self.replay_buffer: Optional[ReplayBuffer] = None
+        self.training_steps = 0
 
-        stagnation_steps = 0
+        torch.manual_seed(42)
 
-        while self.env.pending_jobs:
-            schedulable = []
+    # ------------------------------------------------------------------
+    # Feature engineering helpers
+    # ------------------------------------------------------------------
+    def _initialise_statistics(self) -> None:
+        jobs = self.env.jobs
+        ops = [op for job in jobs for op in job.operations]
+        machines = self.env.machines
 
-            for job in self.env.pending_jobs:
-                for op in job.operations:
-                    if hasattr(op, "completed") and op.completed:
+        self.max_due_date = max((job.due_date for job in jobs), default=1.0)
+        self.max_processing_time = max((op.nominal_processing_time for op in ops), default=1.0)
+        self.max_ops_per_job = max((len(job.operations) for job in jobs), default=1)
+        self.max_priority = max((job.priority for job in jobs), default=1)
+        self.max_weight = max((job.weight for job in jobs), default=1.0)
+        self.total_jobs = max(len(jobs), 1)
+        self.total_operations = max(len(ops), 1)
+        self.max_energy_rate = max(
+            (cfg.energy_rate for machine in machines for cfg in machine.available_configs),
+            default=1.0,
+        )
+
+    def _normalise(self, value: float, scale: float) -> float:
+        return float(value) / (scale + 1e-6)
+
+    def _state_features(self) -> np.ndarray:
+        current_time = self.env.current_time
+        pending_jobs = self.env.pending_jobs
+        machines = self.env.machines
+
+        if pending_jobs:
+            slacks = [job.due_date - current_time for job in pending_jobs]
+            remaining_ops = [job.remaining_operations for job in pending_jobs]
+        else:
+            slacks = [0.0]
+            remaining_ops = [0.0]
+
+        utilizations = [
+            machine.total_processing_time / max(current_time, 1.0)
+            for machine in machines
+        ]
+        next_available = [machine.next_available_time for machine in machines]
+
+        features = np.array(
+            [
+                self._normalise(current_time, self.max_due_date),
+                len(pending_jobs) / self.total_jobs,
+                np.mean(slacks) / (self.max_due_date + 1e-6),
+                np.min(slacks) / (self.max_due_date + 1e-6),
+                np.mean(remaining_ops) / self.max_ops_per_job,
+                np.mean(utilizations),
+                np.mean(next_available) / (self.max_due_date + 1e-6),
+                np.max(next_available) / (self.max_due_date + 1e-6),
+                len(self.env.completed_jobs) / self.total_jobs,
+                self.env.compute_metrics()["energy_consumption"] / (
+                    self.max_energy_rate * self.max_due_date * self.total_jobs
+                ),
+            ],
+            dtype=np.float32,
+        )
+
+        return features
+
+    def _operation_processing_time(self, machine, operation) -> float:
+        speed = machine.current_config.processing_speeds.get(operation.operation_type, 1.0)
+        return operation.nominal_processing_time / max(speed, 1e-6)
+
+    def _action_features(
+        self,
+        job,
+        operation,
+        machine,
+        start_time: float,
+        processing_time: float,
+    ) -> np.ndarray:
+        completion_time = start_time + processing_time
+        slack_at_completion = job.due_date - completion_time
+        tardiness = max(completion_time - job.due_date, 0.0)
+
+        features = np.array(
+            [
+                job.arrival_time / (self.max_due_date + 1e-6),
+                job.due_date / (self.max_due_date + 1e-6),
+                job.priority / (self.max_priority + 1e-6),
+                job.weight / (self.max_weight + 1e-6),
+                job.remaining_operations / self.max_ops_per_job,
+                operation.nominal_processing_time / (self.max_processing_time + 1e-6),
+                processing_time / (self.max_processing_time + 1e-6),
+                machine.next_available_time / (self.max_due_date + 1e-6),
+                start_time / (self.max_due_date + 1e-6),
+                completion_time / (self.max_due_date + 1e-6),
+                slack_at_completion / (self.max_due_date + 1e-6),
+                tardiness / (self.max_due_date + 1e-6),
+                machine.current_config.energy_rate / (self.max_energy_rate + 1e-6),
+            ],
+            dtype=np.float32,
+        )
+
+        return features
+
+    def _enumerate_actions(self) -> List[ActionCandidate]:
+        candidates: List[ActionCandidate] = []
+
+        for job in self.env.pending_jobs:
+            for operation in job.operations:
+                if getattr(operation, "completed", False):
+                    continue
+
+                if not all(
+                    getattr(job.operations[p], "completed", False) for p in operation.precedence
+                ):
+                    continue
+
+                for machine in self.env.machines:
+                    if not machine.can_process(operation):
                         continue
 
-                    if not all(
-                        hasattr(job.operations[p], "completed") and job.operations[p].completed
-                        for p in op.precedence
-                    ):
-                        continue
+                    start_time = max(self.env.current_time, machine.next_available_time)
+                    processing_time = self._operation_processing_time(machine, operation)
+                    features = self._action_features(job, operation, machine, start_time, processing_time)
+                    candidates.append(
+                        ActionCandidate(job, operation, machine, start_time, processing_time, features)
+                    )
 
-                    compatible_machines = [
-                        machine for machine in self.env.machines if machine.can_process(op)
-                    ]
-
-                    if not compatible_machines:
-                        continue
-
-                    machine = min(compatible_machines, key=lambda m: m.next_available_time)
-                    earliest_start = max(self.env.current_time, machine.next_available_time)
-
-                    schedulable.append((job, op, machine, earliest_start))
-                    break
-
-            if not schedulable:
-                # Advance time to the next machine availability to avoid infinite loops
-                future_times = [
-                    m.next_available_time for m in self.env.machines
-                    if m.next_available_time > self.env.current_time
-                ]
-
-                if not future_times:
-                    logger.warning("No schedulable operations remaining; terminating early")
-                    break
-
-                next_time = min(future_times)
-                logger.debug("Advancing environment time from %.2f to %.2f to make progress", self.env.current_time, next_time)
-                self.env.current_time = next_time
-                stagnation_steps += 1
-
-                # Fail-safe to prevent edge-case infinite loops
-                if stagnation_steps > 1000:
-                    logger.warning("Exceeded stagnation threshold in SimpleDQN; aborting run")
-                    break
-
-                continue
-
-            job, op, machine, start_time = random.choice(schedulable)
-
-            result = self.env.assign_operation(
-                job.job_id,
-                op.op_id,
-                machine.machine_id,
-                start_time,
-            )
-
-            if result.get("success"):
-                stagnation_steps = 0
-                continue
-
-            logger.debug(
-                "Assignment failed for job %s op %s on machine %s: %s",
-                job.job_id,
-                op.op_id,
-                machine.machine_id,
-                result.get("message", "unknown error"),
-            )
-
-            stagnation_steps += 1
-            if stagnation_steps > 1000:
-                logger.warning("Exceeded stagnation threshold in SimpleDQN after failures; aborting run")
+                # Only consider the next unscheduled operation per job
                 break
 
-        return self.env.compute_metrics()
+        return candidates
+
+    def _initialise_network(self) -> None:
+        state_dim = len(self._state_features())
+        actions = self._enumerate_actions()
+        if not actions:
+            raise RuntimeError("No feasible actions available to initialise DQN")
+
+        action_dim = len(actions[0].features)
+        input_dim = state_dim + action_dim
+
+        self.policy_net = QNetwork(input_dim).to(self.device)
+        self.target_net = QNetwork(input_dim).to(self.device)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
+        self.replay_buffer = ReplayBuffer(self.replay_capacity)
+        self.training_steps = 0
+
+    # ------------------------------------------------------------------
+    # Reinforcement learning loop
+    # ------------------------------------------------------------------
+    def _combine(self, state: np.ndarray, action: np.ndarray) -> np.ndarray:
+        return np.concatenate([state, action]).astype(np.float32)
+
+    def _advance_time(self) -> bool:
+        future_times = [
+            machine.next_available_time
+            for machine in self.env.machines
+            if machine.next_available_time > self.env.current_time
+        ]
+
+        if not future_times:
+            return False
+
+        next_time = min(future_times)
+        logger.debug(
+            "Advancing environment time from %.2f to %.2f to unlock schedulable actions",
+            self.env.current_time,
+            next_time,
+        )
+        self.env.current_time = next_time
+        return True
+
+    def _compute_reward(
+        self,
+        candidate: ActionCandidate,
+        result: Dict,
+        job_completed_before: int,
+    ) -> float:
+        completion_time = result.get("completion_time", candidate.start_time + candidate.processing_time)
+        tardiness = max(completion_time - candidate.job.due_date, 0.0)
+        energy_used = candidate.machine.current_config.energy_rate * result.get(
+            "processing_time", candidate.processing_time
+        )
+
+        reward = -(
+            completion_time / (self.max_due_date + 1e-6)
+            + self.tardiness_weight * tardiness / (self.max_due_date + 1e-6)
+            + self.energy_weight * energy_used / (self.max_energy_rate * self.max_due_date + 1e-6)
+        )
+
+        job_completed_after = len(self.env.completed_jobs)
+        if job_completed_after > job_completed_before:
+            # Encourage completing jobs to shorten the makespan
+            reward += self.completion_bonus
+
+        return reward
+
+    def _optimise_model(self) -> None:
+        if self.replay_buffer is None or len(self.replay_buffer) < self.batch_size:
+            return
+
+        assert self.policy_net is not None
+        assert self.target_net is not None
+        assert self.optimizer is not None
+
+        transitions = self.replay_buffer.sample(self.batch_size)
+
+        state_actions = np.stack([self._combine(t.state, t.action) for t in transitions])
+        rewards = np.array([t.reward for t in transitions], dtype=np.float32)
+
+        targets = []
+        for t in transitions:
+            if t.done or len(t.next_actions) == 0:
+                targets.append(t.reward)
+                continue
+
+            next_inputs = np.stack([self._combine(t.next_state, na) for na in t.next_actions])
+            next_tensor = torch.tensor(next_inputs, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                max_next_q = torch.max(self.target_net(next_tensor)).item()
+            targets.append(t.reward + self.gamma * max_next_q)
+
+        state_action_tensor = torch.tensor(state_actions, dtype=torch.float32, device=self.device)
+        reward_tensor = torch.tensor(targets, dtype=torch.float32, device=self.device)
+
+        predicted_q = self.policy_net(state_action_tensor)
+        loss = nn.SmoothL1Loss()(predicted_q, reward_tensor)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
+        self.optimizer.step()
+
+        self.training_steps += 1
+
+        if self.training_steps % self.target_update_interval == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def solve(self) -> Dict:
+        """Train and deploy a DQN policy to schedule operations."""
+
+        logger.info("Running DQN baseline with neural policy")
+
+        self.env.reset()
+        self._initialise_statistics()
+
+        # Reset learning state for every instance to keep comparisons fair
+        self.policy_net = None
+        self.target_net = None
+        self.optimizer = None
+        self.replay_buffer = None
+        self.training_steps = 0
+
+        epsilon = self.epsilon_start
+        total_reward = 0.0
+        decision_count = 0
+        idle_advances = 0
+
+        # Lazily initialise the neural networks once state dimensions are known
+        actions = self._enumerate_actions()
+        if not actions:
+            if not self._advance_time():
+                logger.warning("DQN encountered an instance with no feasible actions")
+                return self.env.compute_metrics()
+            actions = self._enumerate_actions()
+
+        self._initialise_network()
+
+        while True:
+            state_features = self._state_features()
+            actions = self._enumerate_actions()
+
+            if not actions:
+                if not self._advance_time():
+                    logger.warning("DQN stalled without feasible actions; terminating early")
+                    break
+
+                idle_advances += 1
+                if idle_advances > self.max_idle_advances:
+                    logger.warning("Exceeded idle advance limit in DQN; aborting run")
+                    break
+                continue
+
+            idle_advances = 0
+
+            candidates_matrix = np.stack([self._combine(state_features, a.features) for a in actions])
+
+            if random.random() < epsilon:
+                action_index = random.randrange(len(actions))
+            else:
+                with torch.no_grad():
+                    tensor = torch.tensor(candidates_matrix, dtype=torch.float32, device=self.device)
+                    q_values = self.policy_net(tensor).cpu().numpy()
+                action_index = int(np.argmax(q_values))
+
+            selected = actions[action_index]
+            prev_completed_jobs = len(self.env.completed_jobs)
+
+            result = self.env.assign_operation(
+                selected.job.job_id,
+                selected.operation.op_id,
+                selected.machine.machine_id,
+                selected.start_time,
+            )
+
+            if not result.get("success", False):
+                logger.debug(
+                    "Assignment failed for job %s op %s on machine %s: %s",
+                    selected.job.job_id,
+                    selected.operation.op_id,
+                    selected.machine.machine_id,
+                    result.get("message", "unknown error"),
+                )
+                epsilon = min(1.0, epsilon * 1.05)
+                continue
+
+            decision_count += 1
+
+            reward = self._compute_reward(selected, result, prev_completed_jobs)
+            total_reward += reward
+
+            next_state = self._state_features()
+            next_actions = self._enumerate_actions()
+            transition = Transition(
+                state=state_features.copy(),
+                action=selected.features.copy(),
+                reward=reward,
+                next_state=next_state.copy(),
+                next_actions=[a.features.copy() for a in next_actions],
+                done=len(self.env.pending_jobs) == 0,
+            )
+
+            assert self.replay_buffer is not None
+            self.replay_buffer.push(transition)
+            self._optimise_model()
+
+            epsilon = max(self.epsilon_end, epsilon * self.epsilon_decay)
+
+            if transition.done:
+                break
+
+        metrics = self.env.compute_metrics()
+        metrics.update(
+            {
+                "training_reward": total_reward,
+                "decisions": decision_count,
+                "epsilon_final": epsilon,
+            }
+        )
+
+        return metrics
