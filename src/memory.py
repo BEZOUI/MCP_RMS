@@ -1,19 +1,52 @@
-"""
-Self-Learning Memory System
-Episodic memory with similarity-based retrieval
-"""
+"""Self-Learning episodic memory with optional FAISS acceleration."""
+
+from __future__ import annotations
+
+import importlib
+import importlib.util
+import json
+import logging
+import os
+import pickle
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, asdict
-import pickle
-import json
-from pathlib import Path
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics.pairwise import cosine_similarity
-import faiss
-import logging
+
+# ---------------------------------------------------------------------------
+# Optional dependency management
+# ---------------------------------------------------------------------------
+
+# Allow libomp/libiomp to coexist when FAISS and PyTorch are both installed.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+_FAISS_IMPORT_ERROR: Optional[BaseException] = None
+_FAISS_MODULE = None
+
+
+def _load_faiss():
+    """Load FAISS lazily to avoid hard dependency conflicts."""
+
+    global _FAISS_MODULE, _FAISS_IMPORT_ERROR
+
+    if _FAISS_MODULE is not None or _FAISS_IMPORT_ERROR is not None:
+        return _FAISS_MODULE
+
+    spec = importlib.util.find_spec("faiss")
+    if spec is None:
+        _FAISS_IMPORT_ERROR = ModuleNotFoundError("faiss module not found")
+        return None
+
+    try:
+        _FAISS_MODULE = importlib.import_module("faiss")
+    except BaseException as exc:  # pragma: no cover - defensive guard
+        _FAISS_IMPORT_ERROR = exc
+        _FAISS_MODULE = None
+
+    return _FAISS_MODULE
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +147,8 @@ class StateEmbedder:
 
 class MemorySystem:
     """Self-learning memory system with episodic storage"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  max_episodes: int = 10000,
                  embedding_dim: int = 128,
                  save_dir: str = "data/memory"):
@@ -130,8 +163,9 @@ class MemorySystem:
         
         # State embeddings for similarity search
         self.embedder = StateEmbedder(embedding_dim)
-        self.index = None  # FAISS index
-        
+        self.index = None  # Optional FAISS index
+        self._embedding_matrix: Optional[np.ndarray] = None
+
         # Performance tracking
         self.config_performance = {}  # config_id -> List[performance]
         self.strategy_performance = {}  # strategy -> List[performance]
@@ -179,39 +213,61 @@ class MemorySystem:
             self.episodes = list(set(high_reward + recent))
         
         logger.debug(f"Stored episode {episode.episode_id} with reward {reward:.2f}")
-    
+
     def build_index(self):
         """Build FAISS index for similarity search"""
         if len(self.episodes) < 10:
             logger.warning("Too few episodes to build index")
             return
-        
+
         # Extract states and fit embedder
         states = [ep.state for ep in self.episodes]
         embeddings = self.embedder.fit_transform(states)
-        
+
+        self._embedding_matrix = embeddings
+
+        faiss_module = _load_faiss()
+        if faiss_module is None:
+            if _FAISS_IMPORT_ERROR is not None:
+                logger.warning(
+                    "FAISS unavailable (%s); falling back to numpy similarity search",
+                    _FAISS_IMPORT_ERROR,
+                )
+            else:  # pragma: no cover - defensive fallback
+                logger.warning("FAISS unavailable; falling back to numpy similarity search")
+            self.index = None
+            return
+
         # Build FAISS index
         dimension = embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(dimension)
+        self.index = faiss_module.IndexFlatL2(dimension)
         self.index.add(embeddings)
-        
+
         logger.info(f"Built FAISS index with {len(self.episodes)} episodes")
-    
+
     def find_similar_states(self, current_state: Dict, k: int = 5) -> List[Dict]:
         """Find k most similar past states"""
-        if not self.index or len(self.episodes) < k:
+        if len(self.episodes) == 0 or self._embedding_matrix is None:
             return []
-        
+
         # Embed current state
         query_embedding = self.embedder.transform(current_state).reshape(1, -1)
-        
+
         # Search
         k_actual = min(k, len(self.episodes))
-        distances, indices = self.index.search(query_embedding, k_actual)
-        
+        if self.index is not None:
+            distances, indices = self.index.search(query_embedding, k_actual)
+            indices_iter = zip(indices[0], distances[0])
+        else:
+            # Brute-force fallback using numpy distances
+            diff = self._embedding_matrix[: len(self.episodes)] - query_embedding
+            distances_np = np.linalg.norm(diff, axis=1)
+            nearest_idx = np.argsort(distances_np)[:k_actual]
+            indices_iter = ((idx, distances_np[idx]) for idx in nearest_idx)
+
         # Retrieve episodes
         similar_episodes = []
-        for idx, dist in zip(indices[0], distances[0]):
+        for idx, dist in indices_iter:
             if idx < len(self.episodes):
                 ep = self.episodes[idx]
                 similar_episodes.append({
