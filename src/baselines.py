@@ -17,6 +17,10 @@ import logging
 
 # Allow libomp/libiomp to coexist when FAISS and PyTorch are both installed.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Limit OpenMP thread pools to avoid desktop crashes and improve stability.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
 def _load_optional_torch():
@@ -28,6 +32,19 @@ def _load_optional_torch():
     torch_module = importlib.import_module("torch")
     nn_module = importlib.import_module("torch.nn")
     optim_module = importlib.import_module("torch.optim")
+
+    try:  # Keep CPU usage predictable on commodity machines.
+        torch_module.set_num_threads(int(os.environ.get("MCP_TORCH_THREADS", "1")))
+    except (TypeError, ValueError):  # pragma: no cover - environment dependent
+        torch_module.set_num_threads(1)
+
+    try:  # pragma: no cover - optional depending on torch build
+        import torch.multiprocessing as torch_mp
+
+        torch_mp.set_sharing_strategy("file_system")
+    except Exception:  # pragma: no cover - best effort guard
+        pass
+
     return torch_module, nn_module, optim_module
 
 

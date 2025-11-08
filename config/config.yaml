@@ -67,6 +67,8 @@ experiments:
   benchmark_suite: "benchmark_suite"
   
   results_dir: "data/results"
+  simple_dqn_timeout: 900
+  isolate_simple_dqn: true
   
   # Instance sizes to generate
   instance_sizes:
