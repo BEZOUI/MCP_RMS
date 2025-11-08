@@ -4,14 +4,32 @@ import random
 from collections import namedtuple
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+import importlib
 
 import numpy as np
-import torch
-import torch.nn as nn
 from deap import algorithms, base, creator, tools
 
 import logging
+
+
+def _load_optional_torch():
+    """Load torch-related modules when available."""
+    spec = importlib.util.find_spec("torch")
+    if spec is None:
+        return None, None, None
+
+    torch_module = importlib.import_module("torch")
+    nn_module = importlib.import_module("torch.nn")
+    optim_module = importlib.import_module("torch.optim")
+    return torch_module, nn_module, optim_module
+
+
+torch, nn, optim = _load_optional_torch()
+
+if TYPE_CHECKING:  # pragma: no cover - typing helper
+    import torch as _torch
 
 logger = logging.getLogger(__name__)
 
@@ -632,27 +650,49 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-class QNetwork(nn.Module):
-    """Feed-forward network used to approximate Q-values."""
+if torch is not None:
 
-    def __init__(self, input_dim: int):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-        )
+    class QNetwork(nn.Module):
+        """Feed-forward network used to approximate Q-values."""
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - thin wrapper
-        return self.model(x).squeeze(-1)
+        def __init__(self, input_dim: int):
+            super().__init__()
+            self.model = nn.Sequential(
+                nn.Linear(input_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 256),
+                nn.ReLU(),
+                nn.Linear(256, 1),
+            )
+
+        def forward(self, x: "_torch.Tensor") -> "_torch.Tensor":  # pragma: no cover - thin wrapper
+            return self.model(x).squeeze(-1)
+
+else:  # pragma: no cover - optional dependency fallback
+
+    class QNetwork:  # type: ignore[override]
+        """Placeholder raising a clear error when torch is unavailable."""
+
+        def __init__(self, _input_dim: int):
+            raise RuntimeError(
+                "PyTorch is required for the SimpleDQN baseline. Install torch>=2.0.0 to enable it."
+            )
+
 
 
 class SimpleDQN:
     """Deep Q-Network baseline with on-the-fly scheduling features."""
 
+    @classmethod
+    def is_available(cls) -> bool:
+        return torch is not None
+
     def __init__(self, env):
+        if not self.is_available():
+            raise RuntimeError(
+                "PyTorch is required for the SimpleDQN baseline. Install torch>=2.0.0 to enable it."
+            )
+
         self.env = env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -673,7 +713,7 @@ class SimpleDQN:
         # Runtime members initialised during solve()
         self.policy_net: Optional[QNetwork] = None
         self.target_net: Optional[QNetwork] = None
-        self.optimizer: Optional[torch.optim.Optimizer] = None
+        self.optimizer: Optional[object] = None
         self.replay_buffer: Optional[ReplayBuffer] = None
         self.training_steps = 0
 
@@ -818,7 +858,7 @@ class SimpleDQN:
         self.policy_net = QNetwork(input_dim).to(self.device)
         self.target_net = QNetwork(input_dim).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
         self.replay_buffer = ReplayBuffer(self.replay_capacity)
         self.training_steps = 0
 

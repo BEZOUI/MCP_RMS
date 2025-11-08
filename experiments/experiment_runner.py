@@ -42,7 +42,7 @@ DISPATCH_BASELINES = {
 
 class ExperimentRunner:
     """Run comprehensive experiments"""
-    
+
     def __init__(self, config: Dict):
         self.config = config
         default_results_dir = config.get('experiments', {}).get('results_dir', 'data/results')
@@ -55,6 +55,21 @@ class ExperimentRunner:
         
         # Results storage
         self.all_results = []
+
+    def _filter_methods(self, methods: List[str]) -> List[str]:
+        """Remove methods whose dependencies are unavailable."""
+        filtered: List[str] = []
+
+        for method in methods:
+            if method == "simple_dqn" and not SimpleDQN.is_available():
+                logger.warning(
+                    "Skipping simple_dqn baseline because PyTorch is not installed."
+                )
+                continue
+
+            filtered.append(method)
+
+        return filtered
     
     def run_method(self, method_name: str, env: RMSEnvironment, 
                    trial: int = 0) -> Dict:
@@ -140,9 +155,9 @@ class ExperimentRunner:
             'methods': {}
         }
         
-        for method in methods:
+        for method in self._filter_methods(methods):
             logger.info(f"Method: {method}")
-            
+
             method_results = []
             
             for trial in range(num_trials):
@@ -206,7 +221,9 @@ class ExperimentRunner:
                 "simulated_annealing",
                 "simple_dqn",
             ]
-        
+
+        methods = self._filter_methods(methods)
+
         logger.info(f"Running benchmark suite: {suite_name}")
         logger.info(f"Methods: {methods}")
         logger.info(f"Trials per instance: {num_trials}")
