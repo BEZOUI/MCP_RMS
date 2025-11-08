@@ -1,0 +1,84 @@
+# Adaptive MCP-RMS Configuration
+
+# Environment settings
+environment:
+  num_machines: 15
+  num_configs_per_machine: 4
+  seed: 42
+
+# Job generation
+jobs:
+  num_jobs: 50
+  min_operations: 3
+  max_operations: 8
+  arrival_pattern: "poisson"  # uniform, poisson
+  due_date_tightness: 3.0
+
+# MCP Server settings
+mcp_server:
+  max_iterations: 50
+  objective: "minimize_makespan"
+
+# LLM settings
+llm:
+  model: "claude-sonnet-4-20250514"
+  temperature: 0.3
+  max_tokens: 8192
+  anthropic_api_key: null  # Set via environment variable
+
+# Memory settings
+memory:
+  max_episodes: 10000
+  embedding_dim: 128
+  save_dir: "data/memory"
+
+# Baseline algorithm settings
+baselines:
+  # Genetic Algorithm
+  ga_population: 100
+  ga_generations: 500
+  ga_crossover_prob: 0.8
+  ga_mutation_prob: 0.2
+  
+  # Simulated Annealing
+  sa_initial_temp: 1000
+  sa_cooling_rate: 0.95
+  sa_iterations: 10000
+
+# Experiment settings
+experiments:
+  num_trials: 10
+  methods:
+    - "adaptive_mcp_rms"
+    - "fifo"
+    - "spt"
+    - "edd"
+    - "mwkr"
+    - "genetic_algorithm"
+    - "simulated_annealing"
+  
+  benchmark_suite: "benchmark_suite"
+  
+  results_dir: "data/results"
+  
+  # Instance sizes to generate
+  instance_sizes:
+    small:
+      num_machines: 5
+      num_jobs: 20
+      count: 10
+    medium:
+      num_machines: 15
+      num_jobs: 50
+      count: 10
+    large:
+      num_machines: 30
+      num_jobs: 100
+      count: 10
+
+# Output settings
+output:
+  log_file: "rms.log"
+  log_level: "INFO"
+  save_intermediate: true
+  generate_plots: true
