@@ -1,0 +1,21 @@
+2025-11-08 16:28:23,487 - src.baselines - INFO - Running FIFO dispatching rule
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 0 completed at time 27.59
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 10 completed at time 20.76
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 16 completed at time 44.67
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 5 completed at time 60.57
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 6 completed at time 86.03
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 7 completed at time 112.77
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 1 completed at time 126.93
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 3 completed at time 139.26
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 4 completed at time 153.37
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 18 completed at time 171.83
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 14 completed at time 173.45
+2025-11-08 16:28:23,488 - src.environment - INFO - Job 15 completed at time 206.13
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 11 completed at time 218.58
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 9 completed at time 240.41
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 17 completed at time 275.92
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 2 completed at time 286.94
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 12 completed at time 296.82
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 13 completed at time 337.61
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 8 completed at time 381.66
+2025-11-08 16:28:23,489 - src.environment - INFO - Job 19 completed at time 381.46

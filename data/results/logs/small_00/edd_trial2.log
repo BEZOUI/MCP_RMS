@@ -1,0 +1,21 @@
+2025-11-08 16:28:23,531 - src.baselines - INFO - Running EDD dispatching rule
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 10 completed at time 20.76
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 3 completed at time 33.09
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 4 completed at time 48.45
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 18 completed at time 80.34
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 8 completed at time 112.79
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 13 completed at time 130.78
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 6 completed at time 155.11
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 2 completed at time 168.53
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 11 completed at time 200.11
+2025-11-08 16:28:23,531 - src.environment - INFO - Job 14 completed at time 198.28
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 7 completed at time 238.12
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 0 completed at time 238.13
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 5 completed at time 256.94
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 17 completed at time 290.74
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 12 completed at time 308.19
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 19 completed at time 330.22
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 1 completed at time 351.21
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 16 completed at time 366.01
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 9 completed at time 401.86
+2025-11-08 16:28:23,532 - src.environment - INFO - Job 15 completed at time 424.66
