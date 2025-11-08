@@ -1,375 +1,478 @@
-"""
-Results analysis and visualization
-"""
+"""Results analysis and visualization utilities."""
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
 from scipy import stats
-import logging
+
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class MetricInfo:
+    """Metadata describing a metric used in the analysis."""
+
+    label: str
+    higher_is_better: bool
+
+
 class ResultsAnalyzer:
-    """Analyze and visualize experimental results"""
-    
-    def __init__(self, results: List[Dict], output_dir: str = "data/results/figures"):
+    """Analyze and visualize experimental results.
+
+    The analyzer generates an extensive set of visualisations (30+ figures)
+    covering different aspects of the benchmark results. All plots are stored
+    on disk, and summary tables/statistical comparisons are produced for use
+    in reports or publications.
+    """
+
+    def __init__(self, results: List[Dict], output_dir: Path | str = "data/results/figures"):
         self.results = results
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Set style
+
         sns.set_style("whitegrid")
-        plt.rcParams['figure.figsize'] = (12, 8)
-        plt.rcParams['font.size'] = 12
-        
-        # Create DataFrame
+        plt.rcParams["figure.figsize"] = (12, 8)
+        plt.rcParams["font.size"] = 12
+
+        self.metric_info: Dict[str, MetricInfo] = {
+            "makespan_mean": MetricInfo("Makespan", False),
+            "tardiness_mean": MetricInfo("Total Tardiness", False),
+            "energy_mean": MetricInfo("Energy Consumption", False),
+            "time_mean": MetricInfo("Runtime (s)", False),
+            "success_rate": MetricInfo("Success Rate", True),
+        }
+
         self.df = self._create_dataframe()
-    
+        self.generated_figures: List[Path] = []
+
+    # ------------------------------------------------------------------
+    # Data preparation
+    # ------------------------------------------------------------------
     def _create_dataframe(self) -> pd.DataFrame:
-        """Convert results to DataFrame"""
-        rows = []
-        
+        """Convert nested results into a tabular DataFrame."""
+
+        rows: List[Dict] = []
+
         for result in self.results:
-            instance_name = result['instance_name']
-            num_machines = result['num_machines']
-            num_jobs = result['num_jobs']
-            
-            for method, data in result['methods'].items():
-                if data.get('success_rate', 0) > 0:
-                    row = {
-                        'instance': instance_name,
-                        'instance_size': f"{num_machines}x{num_jobs}",
-                        'num_machines': num_machines,
-                        'num_jobs': num_jobs,
-                        'method': method,
-                        'makespan_mean': data['makespan_mean'],
-                        'makespan_std': data['makespan_std'],
-                        'makespan_min': data['makespan_min'],
-                        'makespan_max': data['makespan_max'],
-                        'tardiness_mean': data['tardiness_mean'],
-                        'energy_mean': data['energy_mean'],
-                        'time_mean': data['time_mean'],
-                        'success_rate': data['success_rate']
+            instance_name = result["instance_name"]
+            num_machines = result["num_machines"]
+            num_jobs = result["num_jobs"]
+
+            for method, data in result["methods"].items():
+                if data.get("success_rate", 0) <= 0:
+                    continue
+
+                rows.append(
+                    {
+                        "instance": instance_name,
+                        "instance_size": f"{num_machines}x{num_jobs}",
+                        "num_machines": num_machines,
+                        "num_jobs": num_jobs,
+                        "problem_size": num_machines * num_jobs,
+                        "method": method,
+                        "makespan_mean": data["makespan_mean"],
+                        "makespan_std": data.get("makespan_std", np.nan),
+                        "makespan_min": data.get("makespan_min", np.nan),
+                        "makespan_max": data.get("makespan_max", np.nan),
+                        "tardiness_mean": data.get("tardiness_mean", np.nan),
+                        "energy_mean": data.get("energy_mean", np.nan),
+                        "time_mean": data.get("time_mean", np.nan),
+                        "success_rate": data.get("success_rate", 0.0),
                     }
-                    rows.append(row)
-        
-        return pd.DataFrame(rows)
-    
-    def plot_makespan_comparison(self, save: bool = True):
-        """Plot makespan comparison across methods"""
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        
-        # Group by instance size
-        small = self.df[self.df['instance'].str.contains('small')]
-        medium = self.df[self.df['instance'].str.contains('medium')]
-        large = self.df[self.df['instance'].str.contains('large')]
-        
-        datasets = [
-            (small, 'Small Instances (5x20)', axes[0]),
-            (medium, 'Medium Instances (15x50)', axes[1]),
-            (large, 'Large Instances (30x100)', axes[2])
-        ]
-        
-        for data, title, ax in datasets:
-            if len(data) > 0:
-                # Group by method and calculate mean
-                grouped = data.groupby('method')['makespan_mean'].agg(['mean', 'std'])
-                grouped = grouped.sort_values('mean')
-                
-                # Plot
-                x = np.arange(len(grouped))
-                ax.bar(x, grouped['mean'], yerr=grouped['std'], 
-                      capsize=5, alpha=0.7, color='steelblue')
-                ax.set_xticks(x)
-                ax.set_xticklabels(grouped.index, rotation=45, ha='right')
-                ax.set_ylabel('Makespan')
-                ax.set_title(title)
-                ax.grid(axis='y', alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save:
-            plt.savefig(self.output_dir / 'makespan_comparison.png', dpi=300, bbox_inches='tight')
-            logger.info(f"Saved makespan comparison plot")
-        
-        plt.show()
-    
-    def plot_performance_profiles(self, save: bool = True):
-        """Plot performance profiles (cumulative distribution)"""
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # Get unique methods
-        methods = self.df['method'].unique()
-        
-        # Calculate performance ratios for each instance
-        instances = self.df['instance'].unique()
-        
-        for method in methods:
-            ratios = []
-            
-            for instance in instances:
-                instance_data = self.df[self.df['instance'] == instance]
-                
-                if len(instance_data) > 0:
-                    # Get best makespan for this instance
-                    best_makespan = instance_data['makespan_mean'].min()
-                    
-                    # Get this method's makespan
-                    method_data = instance_data[instance_data['method'] == method]
-                    
-                    if len(method_data) > 0:
-                        method_makespan = method_data['makespan_mean'].values[0]
-                        ratio = method_makespan / best_makespan
-                        ratios.append(ratio)
-            
-            if ratios:
-                # Sort ratios
-                ratios = sorted(ratios)
-                
-                # Calculate cumulative distribution
-                n = len(ratios)
-                cumulative = np.arange(1, n + 1) / n
-                
-                # Plot
-                ax.plot(ratios, cumulative, marker='o', label=method, linewidth=2)
-        
-        ax.set_xlabel('Performance Ratio (τ)')
-        ax.set_ylabel('P(ratio ≤ τ)')
-        ax.set_title('Performance Profiles')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(1.0, None)
-        
-        if save:
-            plt.savefig(self.output_dir / 'performance_profiles.png', dpi=300, bbox_inches='tight')
-            logger.info(f"Saved performance profiles plot")
-        
-        plt.show()
-    
-    def plot_computational_time(self, save: bool = True):
-        """Plot computational time comparison"""
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        # Group by method
-        time_data = self.df.groupby('method')['time_mean'].agg(['mean', 'std'])
-        time_data = time_data.sort_values('mean')
-        
-        # Plot
-        x = np.arange(len(time_data))
-        ax.bar(x, time_data['mean'], yerr=time_data['std'], 
-              capsize=5, alpha=0.7, color='coral')
-        ax.set_xticks(x)
-        ax.set_xticklabels(time_data.index, rotation=45, ha='right')
-        ax.set_ylabel('Computational Time (seconds)')
-        ax.set_title('Average Computational Time by Method')
-        ax.set_yscale('log')
-        ax.grid(axis='y', alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save:
-            plt.savefig(self.output_dir / 'computational_time.png', dpi=300, bbox_inches='tight')
-            logger.info(f"Saved computational time plot")
-        
-        plt.show()
-    
-    def plot_scalability(self, save: bool = True):
-        """Plot scalability analysis"""
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        
-        # Extract size information
-        self.df['problem_size'] = self.df['num_machines'] * self.df['num_jobs']
-        
-        methods = self.df['method'].unique()
-        
-        # Plot 1: Makespan vs Problem Size
-        ax = axes[0, 0]
-        for method in methods:
-            method_data = self.df[self.df['method'] == method]
-            grouped = method_data.groupby('problem_size')['makespan_mean'].mean()
-            ax.plot(grouped.index, grouped.values, marker='o', label=method)
-        ax.set_xlabel('Problem Size (machines × jobs)')
-        ax.set_ylabel('Makespan')
-        ax.set_title('Makespan vs Problem Size')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 2: Computational Time vs Problem Size
-        ax = axes[0, 1]
-        for method in methods:
-            method_data = self.df[self.df['method'] == method]
-            grouped = method_data.groupby('problem_size')['time_mean'].mean()
-            ax.plot(grouped.index, grouped.values, marker='o', label=method)
-        ax.set_xlabel('Problem Size (machines × jobs)')
-        ax.set_ylabel('Computational Time (s)')
-        ax.set_title('Computational Time vs Problem Size')
-        ax.set_yscale('log')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 3: Tardiness vs Problem Size
-        ax = axes[1, 0]
-        for method in methods:
-            method_data = self.df[self.df['method'] == method]
-            grouped = method_data.groupby('problem_size')['tardiness_mean'].mean()
-            ax.plot(grouped.index, grouped.values, marker='o', label=method)
-        ax.set_xlabel('Problem Size (machines × jobs)')
-        ax.set_ylabel('Total Tardiness')
-        ax.set_title('Tardiness vs Problem Size')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 4: Energy vs Problem Size
-        ax = axes[1, 1]
-        for method in methods:
-            method_data = self.df[self.df['method'] == method]
-            grouped = method_data.groupby('problem_size')['energy_mean'].mean()
-            ax.plot(grouped.index, grouped.values, marker='o', label=method)
-        ax.set_xlabel('Problem Size (machines × jobs)')
-        ax.set_ylabel('Energy Consumption')
-        ax.set_title('Energy Consumption vs Problem Size')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save:
-            plt.savefig(self.output_dir / 'scalability_analysis.png', dpi=300, bbox_inches='tight')
-            logger.info(f"Saved scalability analysis plot")
-        
-        plt.show()
-    
-    def plot_improvement_heatmap(self, baseline: str = 'fifo', save: bool = True):
-        """Plot improvement heatmap relative to baseline"""
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # Calculate improvements
-        instances = self.df['instance'].unique()
-        methods = [m for m in self.df['method'].unique() if m != baseline]
-        
-        improvements = np.zeros((len(instances), len(methods)))
-        
-        for i, instance in enumerate(instances):
-            instance_data = self.df[self.df['instance'] == instance]
-            
-            # Get baseline performance
-            baseline_data = instance_data[instance_data['method'] == baseline]
-            if len(baseline_data) == 0:
+                )
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            logger.warning("Results DataFrame is empty – no plots will be generated.")
+        return df
+
+    # ------------------------------------------------------------------
+    # Plot helpers
+    # ------------------------------------------------------------------
+    def _save_current_fig(self, fig: plt.Figure, filename: str) -> Path:
+        """Save matplotlib figure and keep track of the output path."""
+
+        filepath = self.output_dir / f"{filename}.png"
+        fig.savefig(filepath, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        self.generated_figures.append(filepath)
+        logger.info("Saved figure %s", filepath)
+        return filepath
+
+    def _has_data(self, metric: str) -> bool:
+        return not self.df.empty and metric in self.df.columns and self.df[metric].notna().any()
+
+    # ------------------------------------------------------------------
+    # Plot families (30+ figures produced programmatically)
+    # ------------------------------------------------------------------
+    def plot_metric_overview(self, metric: str) -> Path | None:
+        if not self._has_data(metric):
+            return None
+
+        info = self.metric_info[metric]
+        agg = self.df.groupby("method")[metric].agg(["mean", "std"]).sort_values("mean", ascending=not info.higher_is_better)
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+        ax.bar(
+            x=np.arange(len(agg)),
+            height=agg["mean"],
+            yerr=agg["std"],
+            capsize=5,
+            color="steelblue",
+            alpha=0.8,
+        )
+        ax.set_xticks(np.arange(len(agg)))
+        ax.set_xticklabels(agg.index, rotation=45, ha="right")
+        ax.set_ylabel(info.label)
+        ax.set_title(f"Average {info.label} by Method")
+        ax.grid(axis="y", alpha=0.3)
+
+        return self._save_current_fig(fig, f"metric_overview_{metric}")
+
+    def plot_metric_box(self, metric: str) -> Path | None:
+        if not self._has_data(metric):
+            return None
+
+        info = self.metric_info[metric]
+        fig, ax = plt.subplots(figsize=(12, 7))
+        sns.boxplot(data=self.df, x="method", y=metric, ax=ax)
+        ax.set_xlabel("Method")
+        ax.set_ylabel(info.label)
+        ax.set_title(f"Distribution of {info.label} across Methods")
+        ax.tick_params(axis="x", rotation=45)
+
+        return self._save_current_fig(fig, f"metric_boxplot_{metric}")
+
+    def plot_metric_violin(self, metric: str) -> Path | None:
+        if not self._has_data(metric):
+            return None
+
+        info = self.metric_info[metric]
+        fig, ax = plt.subplots(figsize=(12, 7))
+        sns.violinplot(data=self.df, x="method", y=metric, inner="quart", ax=ax)
+        ax.set_xlabel("Method")
+        ax.set_ylabel(info.label)
+        ax.set_title(f"Violin Plot of {info.label}")
+        ax.tick_params(axis="x", rotation=45)
+
+        return self._save_current_fig(fig, f"metric_violin_{metric}")
+
+    def plot_metric_trend(self, metric: str, dimension: str) -> Path | None:
+        if not self._has_data(metric):
+            return None
+
+        info = self.metric_info[metric]
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        for method, group in self.df.groupby("method"):
+            trend = group.groupby(dimension)[metric].mean().sort_index()
+            if len(trend) <= 1:
                 continue
-            
-            baseline_makespan = baseline_data['makespan_mean'].values[0]
-            
+            ax.plot(trend.index, trend.values, marker="o", label=method)
+
+        ax.set_xlabel(dimension.replace("_", " ").title())
+        ax.set_ylabel(info.label)
+        ax.set_title(f"{info.label} vs {dimension.replace('_', ' ').title()}")
+        ax.grid(True, alpha=0.3)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+
+        suffix = dimension.replace("_", "")
+        return self._save_current_fig(fig, f"metric_trend_{metric}_{suffix}")
+
+    def plot_metric_heatmap(self, metric: str) -> Path | None:
+        if not self._has_data(metric):
+            return None
+
+        info = self.metric_info[metric]
+        pivot = self.df.pivot_table(index="method", columns="instance_size", values=metric, aggfunc="mean")
+        if pivot.empty:
+            return None
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+        sns.heatmap(pivot, annot=True, fmt=".2f", cmap="viridis", ax=ax)
+        ax.set_xlabel("Instance Size")
+        ax.set_ylabel("Method")
+        ax.set_title(f"Average {info.label} by Instance Size")
+
+        return self._save_current_fig(fig, f"metric_heatmap_{metric}")
+
+    # ------------------------------------------------------------------
+    # Additional visualisations
+    # ------------------------------------------------------------------
+    def plot_performance_profiles(self) -> Path | None:
+        if self.df.empty:
+            return None
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        methods = self.df["method"].unique()
+        instances = self.df["instance"].unique()
+
+        for method in methods:
+            ratios: List[float] = []
+            for instance in instances:
+                instance_data = self.df[self.df["instance"] == instance]
+                if instance_data.empty:
+                    continue
+
+                best = instance_data["makespan_mean"].min()
+                best = max(best, 1e-6)
+
+                method_data = instance_data[instance_data["method"] == method]
+                if method_data.empty:
+                    continue
+
+                ratio = method_data["makespan_mean"].values[0] / best
+                ratios.append(ratio)
+
+            if not ratios:
+                continue
+
+            ratios = sorted(ratios)
+            cumulative = np.arange(1, len(ratios) + 1) / len(ratios)
+            ax.plot(ratios, cumulative, marker="o", linewidth=2, label=method)
+
+        ax.set_xlabel("Performance Ratio (τ)")
+        ax.set_ylabel("P(ratio ≤ τ)")
+        ax.set_title("Performance Profiles (Makespan)")
+        ax.set_xlim(left=1.0)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        return self._save_current_fig(fig, "performance_profiles")
+
+    def plot_computational_time(self) -> Path | None:
+        if not self._has_data("time_mean"):
+            return None
+
+        time_data = self.df.groupby("method")["time_mean"].agg(["mean", "std"]).sort_values("mean")
+        fig, ax = plt.subplots(figsize=(12, 7))
+        ax.bar(np.arange(len(time_data)), time_data["mean"], yerr=time_data["std"], capsize=5, color="coral")
+        ax.set_xticks(np.arange(len(time_data)))
+        ax.set_xticklabels(time_data.index, rotation=45, ha="right")
+        ax.set_ylabel("Runtime (s)")
+        ax.set_title("Average Computational Time by Method")
+        ax.set_yscale("log")
+        ax.grid(axis="y", alpha=0.3)
+
+        return self._save_current_fig(fig, "computational_time")
+
+    def plot_scalability(self) -> Path | None:
+        if self.df.empty:
+            return None
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        metrics = [
+            ("makespan_mean", "Makespan"),
+            ("time_mean", "Runtime (s)"),
+            ("tardiness_mean", "Total Tardiness"),
+            ("energy_mean", "Energy Consumption"),
+        ]
+
+        for ax, (metric, label) in zip(axes.flat, metrics):
+            positive_only = True
+            for method, group in self.df.groupby("method"):
+                trend = group.groupby("problem_size")[metric].mean().sort_index()
+                if len(trend) <= 1:
+                    continue
+                ax.plot(trend.index, trend.values, marker="o", label=method)
+                if (trend.values <= 0).any():
+                    positive_only = False
+
+            ax.set_xlabel("Problem Size (machines × jobs)")
+            ax.set_ylabel(label)
+            ax.set_title(f"{label} vs Problem Size")
+            ax.grid(True, alpha=0.3)
+            if ax in axes[:, 1] and positive_only:
+                ax.set_yscale("log")
+
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 1.02))
+
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        return self._save_current_fig(fig, "scalability_analysis")
+
+    def plot_improvement_heatmap(self, baseline: str = "fifo") -> Path | None:
+        if self.df.empty or baseline not in self.df["method"].unique():
+            return None
+
+        instances = self.df["instance"].unique()
+        methods = [m for m in self.df["method"].unique() if m != baseline]
+        improvements = np.zeros((len(instances), len(methods)))
+
+        for i, instance in enumerate(instances):
+            instance_data = self.df[self.df["instance"] == instance]
+            baseline_data = instance_data[instance_data["method"] == baseline]
+            if baseline_data.empty:
+                continue
+            baseline_makespan = baseline_data["makespan_mean"].values[0]
+
             for j, method in enumerate(methods):
-                method_data = instance_data[instance_data['method'] == method]
-                if len(method_data) > 0:
-                    method_makespan = method_data['makespan_mean'].values[0]
-                    improvement = ((baseline_makespan - method_makespan) / baseline_makespan) * 100
-                    improvements[i, j] = improvement
-        
-        # Plot heatmap
-        im = ax.imshow(improvements, cmap='RdYlGn', aspect='auto', vmin=-20, vmax=20)
-        
-        # Set ticks
+                method_data = instance_data[instance_data["method"] == method]
+                if method_data.empty:
+                    continue
+                method_makespan = method_data["makespan_mean"].values[0]
+                improvements[i, j] = ((baseline_makespan - method_makespan) / baseline_makespan) * 100
+
+        fig, ax = plt.subplots(figsize=(14, 8))
+        heatmap = ax.imshow(improvements, cmap="RdYlGn", aspect="auto", vmin=-25, vmax=25)
         ax.set_xticks(np.arange(len(methods)))
+        ax.set_xticklabels(methods, rotation=45, ha="right")
         ax.set_yticks(np.arange(len(instances)))
-        ax.set_xticklabels(methods, rotation=45, ha='right')
         ax.set_yticklabels(instances)
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label('Improvement (%)', rotation=270, labelpad=20)
-        
-        # Add text annotations
+        ax.set_title(f"Improvement over {baseline.upper()} (%)")
+
         for i in range(len(instances)):
             for j in range(len(methods)):
-                text = ax.text(j, i, f'{improvements[i, j]:.1f}',
-                             ha="center", va="center", color="black", fontsize=8)
-        
-        ax.set_title(f'Improvement over {baseline.upper()} (%)')
-        plt.tight_layout()
-        
-        if save:
-            plt.savefig(self.output_dir / f'improvement_heatmap_{baseline}.png', 
-                       dpi=300, bbox_inches='tight')
-            logger.info(f"Saved improvement heatmap")
-        
-        plt.show()
-    
+                ax.text(j, i, f"{improvements[i, j]:.1f}", ha="center", va="center", color="black", fontsize=8)
+
+        cbar = plt.colorbar(heatmap, ax=ax)
+        cbar.set_label("Improvement (%)", rotation=270, labelpad=20)
+
+        fig.tight_layout()
+        return self._save_current_fig(fig, f"improvement_heatmap_{baseline}")
+
+    # ------------------------------------------------------------------
+    # Statistical analysis utilities
+    # ------------------------------------------------------------------
     def statistical_analysis(self, save: bool = True) -> pd.DataFrame:
-        """Perform statistical analysis"""
-        logger.info("Performing statistical analysis...")
-        
-        # Pairwise comparisons
-        methods = self.df['method'].unique()
-        instances = self.df['instance'].unique()
-        
-        results = []
-        
+        if self.df.empty:
+            return pd.DataFrame()
+
+        methods = sorted(self.df["method"].unique())
+        instances = self.df["instance"].unique()
+        results: List[Dict] = []
+
         for i, method1 in enumerate(methods):
-            for method2 in methods[i+1:]:
-                # Collect paired data
-                data1 = []
-                data2 = []
-                
+            for method2 in methods[i + 1 :]:
+                data1: List[float] = []
+                data2: List[float] = []
+
                 for instance in instances:
-                    instance_data = self.df[self.df['instance'] == instance]
-                    
-                    m1_data = instance_data[instance_data['method'] == method1]
-                    m2_data = instance_data[instance_data['method'] == method2]
-                    
-                    if len(m1_data) > 0 and len(m2_data) > 0:
-                        data1.append(m1_data['makespan_mean'].values[0])
-                        data2.append(m2_data['makespan_mean'].values[0])
-                
-                if len(data1) >= 3:  # Need at least 3 samples
-                    # Paired t-test
-                    statistic, pvalue = stats.ttest_rel(data1, data2)
-                    
-                    # Wilcoxon signed-rank test
-                    w_statistic, w_pvalue = stats.wilcoxon(data1, data2)
-                    
-                    # Effect size (Cohen's d)
-                    diff = np.array(data1) - np.array(data2)
-                    cohens_d = np.mean(diff) / np.std(diff, ddof=1)
-                    
-                    results.append({
-                        'method1': method1,
-                        'method2': method2,
-                        'mean_diff': np.mean(diff),
-                        't_statistic': statistic,
-                        't_pvalue': pvalue,
-                        'w_statistic': w_statistic,
-                        'w_pvalue': w_pvalue,
-                        'cohens_d': cohens_d,
-                        'significant_t': pvalue < 0.05,
-                        'significant_w': w_pvalue < 0.05
-                    })
-        
+                    instance_data = self.df[self.df["instance"] == instance]
+                    m1 = instance_data[instance_data["method"] == method1]
+                    m2 = instance_data[instance_data["method"] == method2]
+
+                    if m1.empty or m2.empty:
+                        continue
+
+                    data1.append(m1["makespan_mean"].values[0])
+                    data2.append(m2["makespan_mean"].values[0])
+
+                if len(data1) < 3:
+                    continue
+
+                diff = np.array(data1) - np.array(data2)
+                statistic, pvalue = stats.ttest_rel(data1, data2)
+                try:
+                    w_stat, w_pvalue = stats.wilcoxon(data1, data2)
+                except ValueError:
+                    w_stat, w_pvalue = np.nan, np.nan
+
+                cohens_d = np.mean(diff) / (np.std(diff, ddof=1) + 1e-9)
+
+                results.append(
+                    {
+                        "method1": method1,
+                        "method2": method2,
+                        "mean_diff": float(np.mean(diff)),
+                        "t_statistic": float(statistic),
+                        "t_pvalue": float(pvalue),
+                        "w_statistic": float(w_stat),
+                        "w_pvalue": float(w_pvalue),
+                        "cohens_d": float(cohens_d),
+                        "significant_t": bool(pvalue < 0.05),
+                        "significant_w": bool(w_pvalue < 0.05) if not np.isnan(w_pvalue) else False,
+                    }
+                )
+
         stats_df = pd.DataFrame(results)
-        
-        if save:
-            stats_df.to_csv(self.output_dir / 'statistical_analysis.csv', index=False)
-            logger.info("Saved statistical analysis")
-        
+        if save and not stats_df.empty:
+            stats_df.to_csv(self.output_dir / "statistical_analysis.csv", index=False)
+            logger.info("Saved statistical analysis to %s", self.output_dir / "statistical_analysis.csv")
+
         return stats_df
-    
+
+    def generate_pairwise_comparisons(self, top_n: int = 10, save: bool = True) -> pd.DataFrame:
+        stats_df = self.statistical_analysis(save=False)
+        if stats_df.empty:
+            return stats_df
+
+        stats_df["abs_mean_diff"] = stats_df["mean_diff"].abs()
+        top = stats_df.sort_values("abs_mean_diff", ascending=False).head(top_n)
+
+        if save:
+            top.to_csv(self.output_dir / "top_pairwise_comparisons.csv", index=False)
+            logger.info("Saved top %d pairwise comparisons", len(top))
+
+        return top
+
     def create_comparison_table(self, save: bool = True) -> pd.DataFrame:
-        """Create comprehensive comparison table"""
-        # Group by method
-        comparison = self.df.groupby('method').agg({
-            'makespan_mean': ['mean', 'std'],
-            'tardiness_mean': ['mean', 'std'],
-            'energy_mean': ['mean', 'std'],
-            'time_mean': ['mean', 'std'],
-            'success_rate': 'mean'
-        }).round(2)
-        
-        # Flatten column names
-        comparison.columns = ['_'.join(col).strip() for col in comparison.columns.values]
+        if self.df.empty:
+            return pd.DataFrame()
+
+        comparison = (
+            self.df.groupby("method").agg(
+                makespan_mean_mean=("makespan_mean", "mean"),
+                makespan_mean_std=("makespan_mean", "std"),
+                tardiness_mean_mean=("tardiness_mean", "mean"),
+                tardiness_mean_std=("tardiness_mean", "std"),
+                energy_mean_mean=("energy_mean", "mean"),
+                energy_mean_std=("energy_mean", "std"),
+                time_mean_mean=("time_mean", "mean"),
+                time_mean_std=("time_mean", "std"),
+                success_rate_mean=("success_rate", "mean"),
+            )
+        ).round(3)
+
+        if save:
+            comparison.to_csv(self.output_dir / "comparison_table.csv")
+            logger.info("Saved comparison table to %s", self.output_dir / "comparison_table.csv")
+
+        return comparison
+
+    # ------------------------------------------------------------------
+    # Report orchestrator
+    # ------------------------------------------------------------------
+    def generate_report(self, baseline: str = "fifo") -> Dict[str, pd.DataFrame]:
+        if self.df.empty:
+            logger.warning("No results available to analyze.")
+            return {}
+
+        logger.info("Generating analysis report with %d methods", self.df["method"].nunique())
+        self.generated_figures.clear()
+
+        for metric in self.metric_info.keys():
+            self.plot_metric_overview(metric)
+            self.plot_metric_box(metric)
+            self.plot_metric_violin(metric)
+            self.plot_metric_trend(metric, "num_jobs")
+            self.plot_metric_trend(metric, "num_machines")
+            self.plot_metric_heatmap(metric)
+
+        # Additional figures beyond the 30 core charts
+        self.plot_performance_profiles()
+        self.plot_computational_time()
+        self.plot_scalability()
+        self.plot_improvement_heatmap(baseline=baseline)
+
+        logger.info("Generated %d figures", len(self.generated_figures))
+
+        comparison_table = self.create_comparison_table(save=True)
+        stats_table = self.statistical_analysis(save=True)
+        top_comparisons = self.generate_pairwise_comparisons(top_n=10, save=True)
+
+        return {
+            "comparison_table": comparison_table,
+            "statistics": stats_table,
+            "top_comparisons": top_comparisons,
+        }

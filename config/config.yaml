@@ -54,8 +54,15 @@ experiments:
     - "spt"
     - "edd"
     - "mwkr"
+    - "lpt"
+    - "lwkr"
+    - "critical_ratio"
+    - "slack_per_operation"
+    - "random_dispatch"
+    - "apparent_tardiness_cost"
     - "genetic_algorithm"
     - "simulated_annealing"
+    - "simple_dqn"
   
   benchmark_suite: "benchmark_suite"
   

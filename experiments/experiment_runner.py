@@ -15,20 +15,40 @@ from src.environment import RMSEnvironment
 from src.memory import MemorySystem
 from src.llm_client import LLMClient
 from src.mcp_server import MCPServer
-from src.baselines import DispatchingRules, GeneticAlgorithm, SimulatedAnnealing
+from src.baselines import (
+    DispatchingRules,
+    GeneticAlgorithm,
+    SimulatedAnnealing,
+    SimpleDQN,
+)
 from src.utils import save_results
 from experiments.benchmark_generator import BenchmarkGenerator
 
 logger = logging.getLogger(__name__)
 
 
+DISPATCH_BASELINES = {
+    "fifo": "fifo",
+    "spt": "spt",
+    "edd": "edd",
+    "mwkr": "mwkr",
+    "lpt": "lpt",
+    "lwkr": "lwkr",
+    "critical_ratio": "critical_ratio",
+    "slack_per_operation": "slack_per_operation",
+    "random_dispatch": "random_dispatch",
+    "apparent_tardiness_cost": "apparent_tardiness_cost",
+}
+
 class ExperimentRunner:
     """Run comprehensive experiments"""
     
     def __init__(self, config: Dict):
         self.config = config
-        self.results_dir = Path(config.get('results_dir', 'data/results'))
+        default_results_dir = config.get('experiments', {}).get('results_dir', 'data/results')
+        self.results_dir = Path(config.get('results_dir', default_results_dir))
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.baselines_cfg = config.get('baselines', {})
         
         # Initialize components
         self.benchmark_gen = BenchmarkGenerator()
@@ -63,36 +83,29 @@ class ExperimentRunner:
                 
                 metrics = result['final_metrics']
                 
-            elif method_name == "fifo":
+            elif method_name in DISPATCH_BASELINES:
                 dr = DispatchingRules(env)
-                metrics = dr.fifo()
-                
-            elif method_name == "spt":
-                dr = DispatchingRules(env)
-                metrics = dr.spt()
-                
-            elif method_name == "edd":
-                dr = DispatchingRules(env)
-                metrics = dr.edd()
-                
-            elif method_name == "mwkr":
-                dr = DispatchingRules(env)
-                metrics = dr.mwkr()
+                dispatch_fn = getattr(dr, DISPATCH_BASELINES[method_name])
+                metrics = dispatch_fn()
                 
             elif method_name == "genetic_algorithm":
                 ga = GeneticAlgorithm(
                     env,
-                    population_size=self.config.get('ga_population', 100),
-                    generations=self.config.get('ga_generations', 500)
+                    population_size=self.baselines_cfg.get('ga_population', 100),
+                    generations=self.baselines_cfg.get('ga_generations', 500)
                 )
                 metrics = ga.solve()
-                
+
             elif method_name == "simulated_annealing":
                 sa = SimulatedAnnealing(
                     env,
-                    iterations=self.config.get('sa_iterations', 10000)
+                    iterations=self.baselines_cfg.get('sa_iterations', 10000)
                 )
                 metrics = sa.solve()
+
+            elif method_name == "simple_dqn":
+                dqn = SimpleDQN(env)
+                metrics = dqn.solve()
                 
             else:
                 raise ValueError(f"Unknown method: {method_name}")
@@ -183,8 +196,15 @@ class ExperimentRunner:
                 "spt",
                 "edd",
                 "mwkr",
+                "lpt",
+                "lwkr",
+                "critical_ratio",
+                "slack_per_operation",
+                "random_dispatch",
+                "apparent_tardiness_cost",
                 "genetic_algorithm",
-                "simulated_annealing"
+                "simulated_annealing",
+                "simple_dqn",
             ]
         
         logger.info(f"Running benchmark suite: {suite_name}")
@@ -232,5 +252,5 @@ class ExperimentRunner:
         
         # Save to CSV
         df.to_csv(self.results_dir / "summary_table.csv", index=False)
-        
+
         return df

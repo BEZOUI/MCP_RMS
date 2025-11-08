@@ -4,7 +4,7 @@ Includes dispatching rules, GA, SA, and DRL methods
 """
 
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Callable
 from copy import deepcopy
 import random
 from deap import base, creator, tools, algorithms
@@ -15,190 +15,263 @@ logger = logging.getLogger(__name__)
 
 class DispatchingRules:
     """Traditional dispatching rule heuristics"""
-    
+
     def __init__(self, env):
         self.env = env
-    
+
+    # ------------------------------------------------------------------
+    # Helper utilities
+    # ------------------------------------------------------------------
+    def _reset(self):
+        """Reset environment before running a heuristic"""
+        self.env.reset()
+
+    @staticmethod
+    def _can_schedule(job, operation) -> bool:
+        """Check precedence feasibility for an operation"""
+        return all(
+            hasattr(job.operations[p], 'completed') and job.operations[p].completed
+            for p in operation.precedence
+        )
+
+    def _assign_operation(self, job, operation) -> bool:
+        """Try assigning the operation to the earliest available machine"""
+        compatible_machines = [m for m in self.env.machines if m.can_process(operation)]
+
+        if not compatible_machines:
+            logger.warning(
+                "No compatible machines for job %s op %s (requires %s)",
+                job.job_id,
+                operation.op_id,
+                operation.required_capability,
+            )
+            return False
+
+        compatible_machines.sort(key=lambda m: m.next_available_time)
+
+        for machine in compatible_machines:
+            start_time = max(self.env.current_time, machine.next_available_time)
+            result = self.env.assign_operation(
+                job.job_id,
+                operation.op_id,
+                machine.machine_id,
+                start_time,
+            )
+            if result['success']:
+                return True
+
+        return False
+
+    def _select_job(self, priority_fn: Callable) -> bool:
+        """Generic single-operation scheduling loop"""
+        candidates = []
+
+        for job in self.env.pending_jobs:
+            for operation in job.operations:
+                if hasattr(operation, 'completed') and operation.completed:
+                    continue
+
+                if not self._can_schedule(job, operation):
+                    continue
+
+                priority = priority_fn(job, operation)
+                candidates.append((priority, job, operation))
+                break
+
+        if not candidates:
+            return False
+
+        # Sort by priority (lower is better)
+        candidates.sort(key=lambda x: x[0])
+
+        for _, job, operation in candidates:
+            if self._assign_operation(job, operation):
+                return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Classic heuristics
+    # ------------------------------------------------------------------
     def fifo(self) -> Dict:
         """First In First Out"""
         logger.info("Running FIFO dispatching rule")
-        self.env.reset()
-        
-        # Sort jobs by arrival time
-        sorted_jobs = sorted(self.env.jobs, key=lambda j: j.arrival_time)
-        
-        # Track which operations have been attempted
-        max_attempts = 3
-        
-        for job in sorted_jobs:
-            for op in job.operations:
-                # Check if all compatible machines are busy or incompatible
-                compatible_machines = [m for m in self.env.machines if m.can_process(op)]
-                
-                if not compatible_machines:
-                    logger.warning(f"No compatible machines for job {job.job_id} op {op.op_id} (requires {op.required_capability})")
-                    continue
-                
-                # Try to assign to least loaded compatible machine
-                assigned = False
-                attempts = 0
-                
-                while not assigned and attempts < max_attempts:
-                    # Sort by next available time
-                    compatible_machines.sort(key=lambda m: m.next_available_time)
-                    
-                    for machine in compatible_machines:
-                        result = self.env.assign_operation(
-                            job.job_id,
-                            op.op_id,
-                            machine.machine_id,
-                            max(self.env.current_time, machine.next_available_time)
-                        )
-                        if result['success']:
-                            assigned = True
-                            break
-                    
-                    attempts += 1
-                
-                if not assigned:
-                    logger.warning(f"Could not assign job {job.job_id} op {op.op_id} after {max_attempts} attempts")
-        
+        self._reset()
+
+        def priority(job, _operation):
+            return job.arrival_time
+
+        while self._select_job(priority):
+            pass
+
         return self.env.compute_metrics()
-    
+
     def spt(self) -> Dict:
         """Shortest Processing Time"""
         logger.info("Running SPT dispatching rule")
-        self.env.reset()
-        
-        # Create list of all operations
-        all_ops = []
-        for job in self.env.jobs:
-            for op in job.operations:
-                all_ops.append((job, op))
-        
-        # Sort by processing time
-        all_ops.sort(key=lambda x: x[1].nominal_processing_time)
-        
-        for job, op in all_ops:
-            # Check precedence
-            can_schedule = all(
-                hasattr(job.operations[p], 'completed') and job.operations[p].completed
-                for p in op.precedence
-            )
-            
-            if not can_schedule:
-                continue
-            
-            # Find compatible machine
-            for machine in self.env.machines:
-                if machine.can_process(op):
-                    result = self.env.assign_operation(
-                        job.job_id,
-                        op.op_id,
-                        machine.machine_id,
-                        max(self.env.current_time, machine.next_available_time)
-                    )
-                    if result['success']:
-                        break
-        
+        self._reset()
+
+        def priority(_job, operation):
+            return operation.nominal_processing_time
+
+        while self._select_job(priority):
+            pass
+
         return self.env.compute_metrics()
-    
+
     def edd(self) -> Dict:
         """Earliest Due Date"""
         logger.info("Running EDD dispatching rule")
-        self.env.reset()
-        
-        # Sort jobs by due date
-        sorted_jobs = sorted(self.env.jobs, key=lambda j: j.due_date)
-        
-        for job in sorted_jobs:
-            for op in job.operations:
-                # Check precedence
-                can_schedule = all(
-                    hasattr(job.operations[p], 'completed') and job.operations[p].completed
-                    for p in op.precedence
-                )
-                
-                if not can_schedule:
-                    continue
-                
-                # Find compatible machine
-                assigned = False
-                for machine in self.env.machines:
-                    if machine.can_process(op):
-                        result = self.env.assign_operation(
-                            job.job_id,
-                            op.op_id,
-                            machine.machine_id,
-                            max(self.env.current_time, machine.next_available_time)
-                        )
-                        if result['success']:
-                            assigned = True
-                            break
-        
+        self._reset()
+
+        def priority(job, _operation):
+            return job.due_date
+
+        while self._select_job(priority):
+            pass
+
         return self.env.compute_metrics()
-    
+
     def mwkr(self) -> Dict:
         """Most Work Remaining"""
         logger.info("Running MWKR dispatching rule")
-        self.env.reset()
-        
-        while self.env.pending_jobs:
-            # Calculate work remaining for each job
-            work_remaining = {}
-            for job in self.env.pending_jobs:
-                remaining_time = sum(
-                    op.nominal_processing_time
-                    for op in job.operations
-                    if not (hasattr(op, 'completed') and op.completed)
-                )
-                work_remaining[job.job_id] = remaining_time
-            
-            # Sort by work remaining (descending)
-            sorted_jobs = sorted(
-                self.env.pending_jobs,
-                key=lambda j: work_remaining[j.job_id],
-                reverse=True
+        self._reset()
+
+        def priority(job, _operation):
+            remaining_time = sum(
+                op.nominal_processing_time
+                for op in job.operations
+                if not (hasattr(op, 'completed') and op.completed)
             )
-            
-            # Schedule next available operation
-            scheduled = False
-            for job in sorted_jobs:
-                for op in job.operations:
-                    if hasattr(op, 'completed') and op.completed:
-                        continue
-                    
-                    # Check precedence
-                    can_schedule = all(
-                        hasattr(job.operations[p], 'completed') and job.operations[p].completed
-                        for p in op.precedence
-                    )
-                    
-                    if not can_schedule:
-                        continue
-                    
-                    # Find compatible machine
-                    for machine in self.env.machines:
-                        if machine.can_process(op):
-                            result = self.env.assign_operation(
-                                job.job_id,
-                                op.op_id,
-                                machine.machine_id,
-                                max(self.env.current_time, machine.next_available_time)
-                            )
-                            if result['success']:
-                                scheduled = True
-                                break
-                    
-                    if scheduled:
-                        break
-                
-                if scheduled:
-                    break
-            
-            if not scheduled:
+            return -remaining_time  # negate for descending ordering
+
+        while self._select_job(priority):
+            pass
+
+        return self.env.compute_metrics()
+
+    # ------------------------------------------------------------------
+    # Extended heuristics to reach 10+ baseline methods
+    # ------------------------------------------------------------------
+    def lpt(self) -> Dict:
+        """Longest Processing Time"""
+        logger.info("Running LPT dispatching rule")
+        self._reset()
+
+        def priority(_job, operation):
+            return -operation.nominal_processing_time
+
+        while self._select_job(priority):
+            pass
+
+        return self.env.compute_metrics()
+
+    def lwkr(self) -> Dict:
+        """Least Work Remaining"""
+        logger.info("Running LWKR dispatching rule")
+        self._reset()
+
+        def priority(job, _operation):
+            remaining_time = sum(
+                op.nominal_processing_time
+                for op in job.operations
+                if not (hasattr(op, 'completed') and op.completed)
+            )
+            return remaining_time
+
+        while self._select_job(priority):
+            pass
+
+        return self.env.compute_metrics()
+
+    def critical_ratio(self) -> Dict:
+        """Critical Ratio scheduling"""
+        logger.info("Running Critical Ratio dispatching rule")
+        self._reset()
+
+        def priority(job, operation):
+            remaining_time = sum(
+                op.nominal_processing_time
+                for op in job.operations
+                if not (hasattr(op, 'completed') and op.completed)
+            )
+            time_until_due = max(job.due_date - self.env.current_time, 1e-3)
+            processing = max(operation.nominal_processing_time, 1e-3)
+            ratio = time_until_due / (remaining_time + processing)
+            return ratio
+
+        while self._select_job(priority):
+            pass
+
+        return self.env.compute_metrics()
+
+    def slack_per_operation(self) -> Dict:
+        """Slack per remaining operation"""
+        logger.info("Running Slack per Operation dispatching rule")
+        self._reset()
+
+        def priority(job, _operation):
+            slack = job.due_date - self.env.current_time
+            remaining_ops = max(job.remaining_operations, 1)
+            return slack / remaining_ops
+
+        while self._select_job(priority):
+            pass
+
+        return self.env.compute_metrics()
+
+    def random_dispatch(self) -> Dict:
+        """Pure random dispatching baseline"""
+        logger.info("Running Random dispatch baseline")
+        self._reset()
+
+        while True:
+            jobs = [job for job in self.env.pending_jobs if job.remaining_operations > 0]
+            if not jobs:
                 break
-        
+
+            job = random.choice(jobs)
+
+            available_ops = [
+                op for op in job.operations
+                if not (hasattr(op, 'completed') and op.completed)
+                and self._can_schedule(job, op)
+            ]
+
+            if not available_ops:
+                if not self._select_job(lambda *_: random.random()):
+                    break
+                continue
+
+            operation = random.choice(available_ops)
+            if not self._assign_operation(job, operation):
+                # fall back to generic selection to progress time
+                if not self._select_job(lambda *_: random.random()):
+                    break
+
+        return self.env.compute_metrics()
+
+    def apparent_tardiness_cost(self, k: float = 2.0) -> Dict:
+        """Apparent Tardiness Cost heuristic"""
+        logger.info("Running Apparent Tardiness Cost dispatching rule")
+        self._reset()
+
+        avg_processing = np.mean([
+            op.nominal_processing_time
+            for job in self.env.jobs
+            for op in job.operations
+        ])
+
+        def priority(job, operation):
+            processing = max(operation.nominal_processing_time, 1e-3)
+            slack = job.due_date - self.env.current_time - processing
+            exp_term = np.exp(-max(slack, 0) / (k * max(avg_processing, 1e-3)))
+            score = (exp_term / processing) * max(job.weight, 1e-3)
+            return -score  # maximize ATC score
+
+        while self._select_job(priority):
+            pass
+
         return self.env.compute_metrics()
 
 
