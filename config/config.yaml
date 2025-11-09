@@ -21,10 +21,15 @@ mcp_server:
 
 # LLM settings
 llm:
-  model: "claude-sonnet-4-20250514"
+  provider: "deepseek"  # Options: deepseek, groq, ollama, auto
+  model: "deepseek-reasoner"
   temperature: 0.3
   max_tokens: 8192
-  anthropic_api_key: null  # Set via environment variable
+  request_timeout: 60
+  groq_api_key: null  # Override for Groq access (defaults to GROQ_API_KEY env var)
+  deepseek_api_key: null  # Override for DeepSeek access (defaults to DEEPSEEK_API_KEY env var)
+  ollama_base_url: "http://localhost:11434"
+  ollama_model: "deepseek-r1:latest"
 
 # Memory settings
 memory:
