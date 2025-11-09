@@ -36,6 +36,13 @@ class MCPServer:
             'rewards': [],
             'states': []
         }
+
+        # LLM health tracking
+        self.llm_enabled = True
+        self._llm_failure_count = 0
+        self._max_llm_failures = 3
+        self._llm_disable_reason: Optional[str] = None
+        self._llm_disable_announced = False
     
     def solve(self, 
               max_iterations: int = 50,
@@ -75,34 +82,62 @@ Start by querying similar past states, then propose your strategy.
             # Query memory for similar states
             similar_episodes = self.memory.find_similar_states(current_state, k=5)
             
-            # Generate LLM response
-            llm_response = self.llm.generate_response(
-                user_message=initial_prompt if iteration == 0 else "Continue optimization based on current state.",
-                state=current_state,
-                similar_episodes=similar_episodes,
-                primitive_descriptions=self.primitives.get_primitive_descriptions()
-            )
-
             actions: List[Dict[str, Any]]
-            if not llm_response['success']:
-                logger.error(
-                    "LLM generation failed: %s", llm_response.get('error')
+            if self.llm_enabled:
+                llm_response = self.llm.generate_response(
+                    user_message=initial_prompt if iteration == 0 else "Continue optimization based on current state.",
+                    state=current_state,
+                    similar_episodes=similar_episodes,
+                    primitive_descriptions=self.primitives.get_primitive_descriptions()
                 )
+
+                if not llm_response['success']:
+                    self._llm_failure_count += 1
+                    logger.error(
+                        "LLM generation failed: %s", llm_response.get('error')
+                    )
+
+                    disable_reason: Optional[str] = None
+                    if llm_response.get('fatal'):
+                        disable_reason = llm_response.get('error') or 'fatal error reported by LLM'
+                    elif self._llm_failure_count >= self._max_llm_failures:
+                        disable_reason = f"{self._llm_failure_count} consecutive failures"
+
+                    if disable_reason:
+                        self.llm_enabled = False
+                        self._llm_disable_reason = disable_reason
+                        self._llm_disable_announced = False
+                        logger.error("Disabling LLM client (%s)", disable_reason)
+
+                    actions = self._generate_default_actions(current_state)
+                    if not actions:
+                        logger.error("No fallback actions available - stopping optimisation loop")
+                        break
+                    logger.info(
+                        "Using heuristic fallback actions because the LLM request did not succeed"
+                    )
+                else:
+                    self._llm_failure_count = 0
+                    # Parse actions from response
+                    actions = self.llm.parse_action_from_response(llm_response['response'])
+
+                    if not actions:
+                        logger.warning("No actions parsed from LLM response")
+                        # Try to schedule remaining jobs with default strategy
+                        actions = self._generate_default_actions(current_state)
+            else:
+                if not self._llm_disable_announced:
+                    reason = self._llm_disable_reason or "previous errors"
+                    logger.warning(
+                        "LLM disabled (%s). Continuing with heuristic actions only.",
+                        reason,
+                    )
+                    self._llm_disable_announced = True
                 actions = self._generate_default_actions(current_state)
                 if not actions:
                     logger.error("No fallback actions available - stopping optimisation loop")
                     break
-                logger.info(
-                    "Using heuristic fallback actions because the LLM request did not succeed"
-                )
-            else:
-                # Parse actions from response
-                actions = self.llm.parse_action_from_response(llm_response['response'])
-
-                if not actions:
-                    logger.warning("No actions parsed from LLM response")
-                    # Try to schedule remaining jobs with default strategy
-                    actions = self._generate_default_actions(current_state)
+                logger.info("Using heuristic fallback actions because the LLM client is disabled")
 
             # Execute actions
             iteration_reward = 0.0

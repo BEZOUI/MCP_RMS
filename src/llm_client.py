@@ -201,8 +201,16 @@ class LLMClient:
         try:
             response_text, token_usage = self._dispatch_request(system_prompt, full_message)
         except Exception as exc:  # pragma: no cover - depends on external runtime
-            logger.error("Erreur lors de l'appel à Ollama : %s", exc)
-            return {"success": False, "error": str(exc), "response": None}
+            error_message = str(exc)
+            lowered = error_message.lower()
+            is_memory_issue = "requires more system memory" in lowered or "unable to load full model" in lowered
+            logger.error("Erreur lors de l'appel à Ollama : %s", error_message)
+            return {
+                "success": False,
+                "error": error_message,
+                "response": None,
+                "fatal": is_memory_issue,
+            }
 
         elapsed = time.time() - start_time
         self._update_statistics(elapsed, token_usage)
