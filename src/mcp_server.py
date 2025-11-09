@@ -82,19 +82,28 @@ Start by querying similar past states, then propose your strategy.
                 similar_episodes=similar_episodes,
                 primitive_descriptions=self.primitives.get_primitive_descriptions()
             )
-            
+
+            actions: List[Dict[str, Any]]
             if not llm_response['success']:
-                logger.error(f"LLM generation failed: {llm_response.get('error')}")
-                break
-            
-            # Parse actions from response
-            actions = self.llm.parse_action_from_response(llm_response['response'])
-            
-            if not actions:
-                logger.warning("No actions parsed from LLM response")
-                # Try to schedule remaining jobs with default strategy
+                logger.error(
+                    "LLM generation failed: %s", llm_response.get('error')
+                )
                 actions = self._generate_default_actions(current_state)
-            
+                if not actions:
+                    logger.error("No fallback actions available - stopping optimisation loop")
+                    break
+                logger.info(
+                    "Using heuristic fallback actions because the LLM request did not succeed"
+                )
+            else:
+                # Parse actions from response
+                actions = self.llm.parse_action_from_response(llm_response['response'])
+
+                if not actions:
+                    logger.warning("No actions parsed from LLM response")
+                    # Try to schedule remaining jobs with default strategy
+                    actions = self._generate_default_actions(current_state)
+
             # Execute actions
             iteration_reward = 0.0
             for action in actions:
