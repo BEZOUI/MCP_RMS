@@ -15,16 +15,22 @@ from urllib import request as urllib_request
 logger = logging.getLogger(__name__)
 
 
-def _post_json(url: str, payload: Dict[str, Any], *, timeout: int) -> Dict[str, Any]:
-    """Send a JSON payload to the given URL and return the decoded response."""
+def _request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: int,
+) -> Dict[str, Any]:
+    """Send an HTTP request and decode the JSON response."""
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib_request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    data: Optional[bytes] = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib_request.Request(url, data=data, headers=headers, method=method)
 
     try:
         with urllib_request.urlopen(req, timeout=timeout) as response:
@@ -32,12 +38,32 @@ def _post_json(url: str, payload: Dict[str, Any], *, timeout: int) -> Dict[str, 
             if hasattr(response.headers, "get_content_charset"):
                 charset = response.headers.get_content_charset() or "utf-8"
             body = response.read().decode(charset, errors="replace")
+            if not body:
+                return {}
             return json.loads(body)
     except urllib_error.HTTPError as exc:  # pragma: no cover - relies on local server
         detail = exc.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"HTTP {exc.code} error from {url}: {detail}") from exc
     except urllib_error.URLError as exc:  # pragma: no cover - relies on local server
         raise RuntimeError(f"Connection error to {url}: {exc}") from exc
+
+
+def _format_size(size_bytes: int) -> str:
+    """Return a human readable representation of a model size."""
+
+    if size_bytes <= 0:
+        return "unknown"
+    gigabytes = size_bytes / (1024 ** 3)
+    if gigabytes >= 1:
+        return f"{gigabytes:.1f} GB"
+    megabytes = size_bytes / (1024 ** 2)
+    return f"{megabytes:.0f} MB"
+
+
+@dataclass
+class _ModelInfo:
+    name: str
+    size: int
 
 
 @dataclass
@@ -49,6 +75,8 @@ class _OllamaConfig:
     temperature: float
     max_tokens: int
     request_timeout: int
+    context_window: int
+    history_limit: int
 
 
 class LLMClient:
@@ -61,18 +89,27 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 500,
         request_timeout: int = 60,
+        context_window: int = 2048,
+        history_limit: int = 6,
     ) -> None:
         resolved_base = base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
-        resolved_model = model or os.environ.get("OLLAMA_MODEL") or "llama3"
+        base = resolved_base.rstrip("/")
+
+        requested_model = model or os.environ.get("OLLAMA_MODEL")
+        available_models = self._fetch_available_models(base, request_timeout)
+        resolved_model = self._resolve_model_name(requested_model, available_models)
 
         self.cfg = _OllamaConfig(
-            base_url=resolved_base.rstrip("/"),
+            base_url=base,
             model=resolved_model,
             temperature=temperature,
             max_tokens=max_tokens,
             request_timeout=request_timeout,
+            context_window=context_window,
+            history_limit=max(history_limit, 0),
         )
 
+        self._available_models = available_models
         self.conversation_history: List[Dict[str, str]] = []
         self.stats = {
             "total_requests": 0,
@@ -215,12 +252,8 @@ class LLMClient:
         elapsed = time.time() - start_time
         self._update_statistics(elapsed, token_usage)
 
-        self.conversation_history.extend(
-            [
-                {"role": "user", "content": full_message},
-                {"role": "assistant", "content": response_text},
-            ]
-        )
+        self._append_history({"role": "user", "content": full_message})
+        self._append_history({"role": "assistant", "content": response_text})
 
         logger.info(
             "Réponse générée via Ollama (%s) en %.2fs",
@@ -237,29 +270,36 @@ class LLMClient:
     def _dispatch_request(
         self, system_prompt: Optional[str], full_message: str
     ) -> (str, int):
-        prompt_parts = []
+        messages: List[Dict[str, str]] = []
         if system_prompt:
-            prompt_parts.append(system_prompt)
-        prompt_parts.append(full_message)
-        prompt = "\n\n".join(prompt_parts)
+            messages.append({"role": "system", "content": system_prompt})
+
+        if self.conversation_history:
+            history_slice = self.conversation_history[-self.cfg.history_limit :]
+            messages.extend(history_slice)
+
+        messages.append({"role": "user", "content": full_message})
 
         payload = {
             "model": self.cfg.model,
-            "prompt": prompt,
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": self.cfg.temperature,
                 "num_predict": self.cfg.max_tokens,
+                "num_ctx": self.cfg.context_window,
             },
         }
 
-        data = _post_json(
-            f"{self.cfg.base_url}/api/generate",
-            payload,
+        data = _request_json(
+            f"{self.cfg.base_url}/api/chat",
+            method="POST",
+            payload=payload,
             timeout=self.cfg.request_timeout,
         )
 
-        content = data.get("response", "")
+        message = data.get("message", {})
+        content = message.get("content", "")
         prompt_tokens = int(data.get("prompt_eval_count") or 0)
         completion_tokens = int(data.get("eval_count") or 0)
         return content, prompt_tokens + completion_tokens
@@ -324,4 +364,65 @@ class LLMClient:
 
     def get_statistics(self) -> Dict[str, Any]:
         return dict(self.stats)
+
+    # ------------------------------------------------------------------
+    # Model discovery helpers
+    # ------------------------------------------------------------------
+    def available_models(self) -> List[Dict[str, Any]]:
+        """Return the cached list of models discovered at initialisation."""
+
+        return [dict(name=m.name, size=m.size) for m in self._available_models]
+
+    def _fetch_available_models(
+        self, base_url: str, timeout: int
+    ) -> List[_ModelInfo]:
+        url = f"{base_url}/api/tags"
+        try:
+            response = _request_json(url, timeout=timeout)
+        except Exception as exc:  # pragma: no cover - relies on external runtime
+            logger.warning("Unable to query Ollama models from %s: %s", url, exc)
+            return []
+
+        models: List[_ModelInfo] = []
+        for entry in response.get("models", []):
+            name = entry.get("name")
+            size = int(entry.get("size") or 0)
+            if not name:
+                continue
+            models.append(_ModelInfo(name=name, size=size))
+        if models:
+            summary = ", ".join(f"{m.name} ({_format_size(m.size)})" for m in models)
+            logger.info("Modèles Ollama détectés : %s", summary)
+        return models
+
+    def _resolve_model_name(
+        self,
+        requested_model: Optional[str],
+        available_models: List[_ModelInfo],
+    ) -> str:
+        if requested_model:
+            logger.info("Utilisation du modèle Ollama demandé : %s", requested_model)
+            return requested_model
+
+        local_models = [m for m in available_models if ":cloud" not in m.name]
+        if local_models:
+            lightest = min(local_models, key=lambda item: item.size or float("inf"))
+            logger.info(
+                "Aucun modèle spécifié - sélection automatique du modèle le plus léger : %s (%s)",
+                lightest.name,
+                _format_size(lightest.size),
+            )
+            return lightest.name
+
+        logger.warning(
+            "Aucun modèle Ollama local détecté - utilisation du modèle par défaut 'llama3.2:1b'."
+        )
+        return "llama3.2:1b"
+
+    def _append_history(self, message: Dict[str, str]) -> None:
+        if self.cfg.history_limit <= 0:
+            return
+        self.conversation_history.append(message)
+        if len(self.conversation_history) > self.cfg.history_limit:
+            self.conversation_history = self.conversation_history[-self.cfg.history_limit :]
 
