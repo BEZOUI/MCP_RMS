@@ -19,17 +19,13 @@ mcp_server:
   max_iterations: 50
   objective: "minimize_makespan"
 
-# LLM settings
+# LLM settings (local Ollama)
 llm:
-  provider: "deepseek"  # Options: deepseek, groq, ollama, auto
-  model: "deepseek-reasoner"
-  temperature: 0.3
-  max_tokens: 8192
+  base_url: "http://localhost:11434"
+  model: "llama3"
+  temperature: 0.7
+  max_tokens: 500
   request_timeout: 60
-  groq_api_key: null  # Override for Groq access (defaults to GROQ_API_KEY env var)
-  deepseek_api_key: null  # Override for DeepSeek access (defaults to DEEPSEEK_API_KEY env var)
-  ollama_base_url: "http://localhost:11434"
-  ollama_model: "deepseek-r1:latest"
 
 # Memory settings
 memory:

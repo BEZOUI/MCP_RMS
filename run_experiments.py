@@ -9,8 +9,6 @@ import argparse
 import subprocess
 from pathlib import Path
 
-import yaml
-
 
 def run_command(cmd):
     """Run command and stream output"""
@@ -60,40 +58,12 @@ def main():
                        help='Execution mode')
     parser.add_argument('--setup', action='store_true',
                        help='Setup environment first')
-    parser.add_argument('--groq-api-key', type=str,
-                       help='Groq API key (or set GROQ_API_KEY env var)')
-    parser.add_argument('--deepseek-api-key', type=str,
-                       help='DeepSeek API key (or set DEEPSEEK_API_KEY env var)')
-    
     args = parser.parse_args()
-    
+
     # Setup if requested
     if args.setup:
         setup_environment()
-    
-    # Set API keys if provided
-    if args.groq_api_key:
-        os.environ['GROQ_API_KEY'] = args.groq_api_key
-    if args.deepseek_api_key:
-        os.environ['DEEPSEEK_API_KEY'] = args.deepseek_api_key
 
-    provider = None
-    config_path = Path('config/config.yaml')
-    if config_path.exists():
-        try:
-            with open(config_path, 'r', encoding='utf-8') as handle:
-                config_data = yaml.safe_load(handle) or {}
-            provider = (config_data.get('llm') or {}).get('provider')
-        except Exception as exc:  # pragma: no cover - defensive logging
-            print(f"Warning: failed to read LLM provider from config ({exc})")
-
-    # Warn if required keys are missing
-    if args.mode != 'quick-test':
-        if provider == 'deepseek' and 'DEEPSEEK_API_KEY' not in os.environ:
-            print("WARNING: DEEPSEEK_API_KEY not set. Set it with --deepseek-api-key or export DEEPSEEK_API_KEY.")
-        if provider == 'groq' and 'GROQ_API_KEY' not in os.environ:
-            print("WARNING: GROQ_API_KEY not set. Set it with --groq-api-key or export GROQ_API_KEY.")
-    
     print("=" * 70)
     print("ADAPTIVE MCP-RMS EXPERIMENTAL FRAMEWORK")
     print("=" * 70)

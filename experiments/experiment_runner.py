@@ -162,15 +162,11 @@ class ExperimentRunner:
                     # Initialize memory and LLM
                     memory = MemorySystem()
                     llm = LLMClient(
-                        provider=self.llm_cfg.get('provider', 'deepseek'),
+                        base_url=self.llm_cfg.get('base_url'),
                         model=self.llm_cfg.get('model'),
-                        temperature=self.llm_cfg.get('temperature', 0.3),
-                        max_tokens=self.llm_cfg.get('max_tokens', 8192),
+                        temperature=self.llm_cfg.get('temperature', 0.7),
+                        max_tokens=self.llm_cfg.get('max_tokens', 500),
                         request_timeout=self.llm_cfg.get('request_timeout', 60),
-                        groq_api_key=self.llm_cfg.get('groq_api_key'),
-                        deepseek_api_key=self.llm_cfg.get('deepseek_api_key'),
-                        ollama_base_url=self.llm_cfg.get('ollama_base_url', 'http://localhost:11434'),
-                        ollama_model=self.llm_cfg.get('ollama_model'),
                     )
 
                     # Create MCP server

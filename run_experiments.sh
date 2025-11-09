@@ -8,8 +8,6 @@ echo "Adaptive MCP-RMS Experimental Framework"
 echo "======================================"
 
 # Set environment variables (override as needed)
-export DEEPSEEK_API_KEY="your-deepseek-key-here"
-# export GROQ_API_KEY="your-groq-key-here"
 # export OLLAMA_BASE_URL="http://localhost:11434"
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
