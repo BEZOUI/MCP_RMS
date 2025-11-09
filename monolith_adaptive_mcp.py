@@ -28,11 +28,33 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-import matplotlib
+MATPLOTLIB_IMPORT_ERROR: Optional[Exception]
+SEABORN_IMPORT_ERROR: Optional[Exception]
 
-matplotlib.use("Agg")  # Headless backend for reliable rendering
-import matplotlib.pyplot as plt
-import seaborn as sns
+MATPLOTLIB_IMPORT_ERROR = None
+SEABORN_IMPORT_ERROR = None
+HAS_MATPLOTLIB = False
+HAS_SEABORN = False
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")  # Headless backend for reliable rendering
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except Exception as exc:  # pragma: no cover - depends on local environment
+    MATPLOTLIB_IMPORT_ERROR = exc
+    plt = None  # type: ignore
+    matplotlib = None  # type: ignore
+    HAS_MATPLOTLIB = False
+
+try:
+    import seaborn as sns
+    HAS_SEABORN = True
+except Exception as exc:  # pragma: no cover - depends on local environment
+    SEABORN_IMPORT_ERROR = exc
+    sns = None  # type: ignore
+    HAS_SEABORN = False
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -110,6 +132,22 @@ def configure_logging(log_path: Path, verbose: bool = False) -> None:
     root_logger.addHandler(console_handler)
 
     logging.getLogger(__name__).info("Logging initialized -> %s", log_path)
+
+    if MATPLOTLIB_IMPORT_ERROR is not None:
+        logging.getLogger(__name__).warning(
+            "Matplotlib unavailable – static PNG charts will be replaced with HTML alternatives (%s)",
+            MATPLOTLIB_IMPORT_ERROR,
+        )
+    elif not HAS_MATPLOTLIB:
+        logging.getLogger(__name__).warning(
+            "Matplotlib support unknown – static PNG charts may be skipped"
+        )
+
+    if SEABORN_IMPORT_ERROR is not None:
+        logging.getLogger(__name__).warning(
+            "Seaborn unavailable – heatmaps and line plots will fall back to Plotly HTML (%s)",
+            SEABORN_IMPORT_ERROR,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +242,70 @@ def extract_job_stats(env: RMSEnvironment) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_html_path(output_path: Path, suffix: str = ".html") -> Path:
+    return output_path if output_path.suffix == suffix else output_path.with_suffix(suffix)
+
+
+def _plot_machine_heatmap_plotly(machine_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
+    if machine_df.empty:
+        return None
+
+    html_path = _ensure_html_path(output_path)
+    heatmap_df = machine_df.set_index("machine")[
+        ["utilization", "energy", "reconfigurations"]
+    ]
+    z = heatmap_df.to_numpy()
+    fig = go.Figure(
+        data=
+        go.Heatmap(
+            z=z,
+            x=heatmap_df.columns,
+            y=heatmap_df.index,
+            colorscale="Viridis",
+            hovertemplate="Machine=%{y}<br>%{x}=%{z:.3f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Machine Vital Signs (interactive)",
+        xaxis_title="Metric",
+        yaxis_title="Machine",
+    )
+    pio.write_html(fig, html_path, include_plotlyjs="cdn", auto_open=False)
+    logging.getLogger(__name__).info(
+        "Saved interactive machine heatmap -> %s", html_path
+    )
+    return html_path
+
+
+def _plot_job_completion_plotly(job_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
+    if job_df.empty or job_df["completion"].isna().all():
+        return None
+
+    html_path = _ensure_html_path(output_path)
+    timeline = job_df.sort_values("completion").reset_index(drop=True)
+    timeline["completed_jobs"] = np.arange(1, len(timeline) + 1)
+    fig = go.Figure(
+        data=
+        go.Scatter(
+            x=timeline["completion"],
+            y=timeline["completed_jobs"],
+            mode="lines+markers",
+            line=dict(color="#2E86AB", width=3),
+            fill="tozeroy",
+        )
+    )
+    fig.update_layout(
+        title="Throughput Trajectory – Adaptive MCP-RMS (interactive)",
+        xaxis_title="Time",
+        yaxis_title="Cumulative completed jobs",
+    )
+    pio.write_html(fig, html_path, include_plotlyjs="cdn", auto_open=False)
+    logging.getLogger(__name__).info(
+        "Saved interactive throughput trajectory -> %s", html_path
+    )
+    return html_path
+
+
 def plot_gantt(schedule_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
     if schedule_df.empty:
         logging.getLogger(__name__).warning("No schedule events recorded – skipping Gantt chart")
@@ -213,6 +315,14 @@ def plot_gantt(schedule_df: pd.DataFrame, output_path: Path) -> Optional[Path]:
     if ops_df.empty:
         logging.getLogger(__name__).warning("No operation events present – skipping Gantt chart")
         return None
+
+    if not HAS_MATPLOTLIB or not HAS_SEABORN or plt is None or sns is None:
+        html_path = _ensure_html_path(output_path)
+        logging.getLogger(__name__).warning(
+            "Matplotlib/Seaborn unavailable – exporting interactive Gantt instead -> %s",
+            html_path,
+        )
+        return plot_interactive_timeline(schedule_df, html_path)
 
     ops_df["duration"] = ops_df["duration"].fillna(
         ops_df["completion_time"] - ops_df["time"]
@@ -271,6 +381,12 @@ def plot_machine_heatmap(machine_df: pd.DataFrame, output_path: Path) -> Optiona
     if machine_df.empty:
         return None
 
+    if not HAS_MATPLOTLIB or not HAS_SEABORN or plt is None or sns is None:
+        logging.getLogger(__name__).warning(
+            "Matplotlib/Seaborn unavailable – exporting interactive heatmap instead"
+        )
+        return _plot_machine_heatmap_plotly(machine_df, output_path)
+
     heatmap_df = machine_df.set_index("machine")[
         ["utilization", "energy", "reconfigurations"]
     ]
@@ -304,6 +420,12 @@ def plot_job_completion(job_df: pd.DataFrame, output_path: Path) -> Optional[Pat
     if job_df.empty or job_df["completion"].isna().all():
         logging.getLogger(__name__).warning("No completed jobs available – skipping trajectory plot")
         return None
+
+    if not HAS_MATPLOTLIB or not HAS_SEABORN or plt is None or sns is None:
+        logging.getLogger(__name__).warning(
+            "Matplotlib/Seaborn unavailable – exporting interactive throughput plot instead"
+        )
+        return _plot_job_completion_plotly(job_df, output_path)
 
     timeline = job_df.sort_values("completion").reset_index(drop=True)
     timeline["completed_jobs"] = np.arange(1, len(timeline) + 1)
@@ -543,11 +665,11 @@ def write_summary_report(
         "## Artefacts",
         "",
         "- `schedule_events.csv` – chronological log of operations and reconfigurations",
-        "- `machine_vitals_heatmap.png` – utilisation / energy / reconfiguration map",
-        "- `gantt_schedule.png` – static cinematic view of the plan",
+        "- `machine_vitals_heatmap.(png|html)` – utilisation / energy / reconfiguration map",
+        "- `gantt_schedule.(png|html)` – cinematic view of the plan",
         "- `timeline.html` – interactive timeline rendered with Plotly",
         "- `performance_radar.html` – normalised KPI radar",
-        "- `job_throughput.png` – throughput evolution",
+        "- `job_throughput.(png|html)` – throughput evolution",
         "",
     ]
 
