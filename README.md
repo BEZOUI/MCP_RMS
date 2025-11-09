@@ -6,7 +6,7 @@ Complete implementation of the Adaptive MCP-RMS framework for intelligent manufa
 
 - **Complete RMS Simulation**: Discrete-event simulation of reconfigurable manufacturing systems
 - **Self-Learning Primitives**: Operations with episodic memory for experience-based learning
-- **LLM Integration**: Claude API integration for intelligent reasoning
+- **LLM Integration**: Local Ollama backend for intelligent reasoning without external APIs
 - **Comprehensive Baselines**: FIFO, SPT, EDD, MWKR, GA, SA implementations
 - **Full Experimental Pipeline**: Benchmark generation, execution, and analysis
 - **Rich Visualizations**: Performance profiles, scalability analysis, statistical comparisons
@@ -24,8 +24,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Set API key
-export ANTHROPIC_API_KEY="your-api-key-here"
+# (Optional) Configure Ollama endpoint
+# export OLLAMA_BASE_URL="http://localhost:11434"
 ```
 
 ## Quick Start
@@ -99,6 +99,7 @@ Edit `config/config.yaml` to customize:
 
 - Environment parameters (machines, jobs)
 - LLM settings (model, temperature)
+- LLM configuration (local Ollama model, temperature, tokens)
 - Algorithm parameters (GA, SA)
 - Experiment settings (trials, methods)
 
@@ -139,7 +140,7 @@ env.generate_jobs(num_jobs=30)
 
 # Initialize components
 memory = MemorySystem()
-llm = LLMClient(api_key="your-key")
+llm = LLMClient(model="auto", auto_select_model=True)
 server = MCPServer(env, memory, llm)
 
 # Solve

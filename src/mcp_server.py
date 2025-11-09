@@ -36,6 +36,13 @@ class MCPServer:
             'rewards': [],
             'states': []
         }
+
+        # LLM health tracking
+        self.llm_enabled = True
+        self._llm_failure_count = 0
+        self._max_llm_failures = 3
+        self._llm_disable_reason: Optional[str] = None
+        self._llm_disable_announced = False
     
     def solve(self, 
               max_iterations: int = 50,
@@ -75,26 +82,63 @@ Start by querying similar past states, then propose your strategy.
             # Query memory for similar states
             similar_episodes = self.memory.find_similar_states(current_state, k=5)
             
-            # Generate LLM response
-            llm_response = self.llm.generate_response(
-                user_message=initial_prompt if iteration == 0 else "Continue optimization based on current state.",
-                state=current_state,
-                similar_episodes=similar_episodes,
-                primitive_descriptions=self.primitives.get_primitive_descriptions()
-            )
-            
-            if not llm_response['success']:
-                logger.error(f"LLM generation failed: {llm_response.get('error')}")
-                break
-            
-            # Parse actions from response
-            actions = self.llm.parse_action_from_response(llm_response['response'])
-            
-            if not actions:
-                logger.warning("No actions parsed from LLM response")
-                # Try to schedule remaining jobs with default strategy
+            actions: List[Dict[str, Any]]
+            if self.llm_enabled:
+                llm_response = self.llm.generate_response(
+                    user_message=initial_prompt if iteration == 0 else "Continue optimization based on current state.",
+                    state=current_state,
+                    similar_episodes=similar_episodes,
+                    primitive_descriptions=self.primitives.get_primitive_descriptions()
+                )
+
+                if not llm_response['success']:
+                    self._llm_failure_count += 1
+                    logger.error(
+                        "LLM generation failed: %s", llm_response.get('error')
+                    )
+
+                    disable_reason: Optional[str] = None
+                    if llm_response.get('fatal'):
+                        disable_reason = llm_response.get('error') or 'fatal error reported by LLM'
+                    elif self._llm_failure_count >= self._max_llm_failures:
+                        disable_reason = f"{self._llm_failure_count} consecutive failures"
+
+                    if disable_reason:
+                        self.llm_enabled = False
+                        self._llm_disable_reason = disable_reason
+                        self._llm_disable_announced = False
+                        logger.error("Disabling LLM client (%s)", disable_reason)
+
+                    actions = self._generate_default_actions(current_state)
+                    if not actions:
+                        logger.error("No fallback actions available - stopping optimisation loop")
+                        break
+                    logger.info(
+                        "Using heuristic fallback actions because the LLM request did not succeed"
+                    )
+                else:
+                    self._llm_failure_count = 0
+                    # Parse actions from response
+                    actions = self.llm.parse_action_from_response(llm_response['response'])
+
+                    if not actions:
+                        logger.warning("No actions parsed from LLM response")
+                        # Try to schedule remaining jobs with default strategy
+                        actions = self._generate_default_actions(current_state)
+            else:
+                if not self._llm_disable_announced:
+                    reason = self._llm_disable_reason or "previous errors"
+                    logger.warning(
+                        "LLM disabled (%s). Continuing with heuristic actions only.",
+                        reason,
+                    )
+                    self._llm_disable_announced = True
                 actions = self._generate_default_actions(current_state)
-            
+                if not actions:
+                    logger.error("No fallback actions available - stopping optimisation loop")
+                    break
+                logger.info("Using heuristic fallback actions because the LLM client is disabled")
+
             # Execute actions
             iteration_reward = 0.0
             for action in actions:
@@ -196,33 +240,156 @@ Start by querying similar past states, then propose your strategy.
         return reward
     
     def _generate_default_actions(self, state: Dict) -> List[Dict]:
-        """Generate default actions when LLM doesn't provide any"""
-        actions = []
-        
-        # Simple FIFO scheduling
-        job_queue = state['job_queue']
-        if not job_queue:
-            return actions
-        
-        # Get first job
-        job = job_queue[0]
-        
-        # Find next unscheduled operation
-        for machine in state['machines']:
-            if machine['state'] == 'idle':
-                # Try to assign an operation
-                actions.append({
-                    'primitive': 'assign_operation',
-                    'parameters': {
-                        'job_id': job['job_id'],
-                        'op_id': 0,
-                        'machine_id': machine['machine_id'],
-                        'start_time': state['current_time']
+        """Generate robust heuristic actions when the LLM is unavailable."""
+
+        ready_operations: List[Dict[str, Any]] = []
+        current_time = self.env.current_time
+
+        # Identify the first ready (precedence satisfied) operation for each pending job
+        for job in self.env.pending_jobs:
+            for operation in job.operations:
+                if getattr(operation, "completed", False):
+                    continue
+
+                if not all(
+                    getattr(job.operations[p], "completed", False) for p in operation.precedence
+                ):
+                    # Predecessors not completed yet
+                    continue
+
+                ready_operations.append(
+                    {
+                        "job": job,
+                        "operation": operation,
                     }
-                })
-                break
-        
-        return actions
+                )
+                break  # only consider the first available operation per job
+
+        if not ready_operations:
+            return []
+
+        # Sort jobs by earliest due date then arrival/priority to mimic EDD/priority dispatching
+        ready_operations.sort(
+            key=lambda item: (
+                item["job"].due_date,
+                item["job"].priority,
+                item["job"].arrival_time,
+            )
+        )
+
+        best_plan: Optional[Dict[str, Any]] = None
+
+        for item in ready_operations:
+            job = item["job"]
+            operation = item["operation"]
+
+            for machine in self.env.machines:
+                available_time = max(current_time, machine.next_available_time)
+                current_config = machine.current_config
+
+                # Helper to evaluate candidate plans
+                def consider_plan(
+                    target_config,
+                    requires_reconfig: bool,
+                    setup_time: float,
+                ) -> None:
+                    nonlocal best_plan
+                    processing_speed = target_config.processing_speeds.get(operation.operation_type, 1.0)
+                    if processing_speed <= 0:
+                        return
+
+                    start_time = available_time
+                    if requires_reconfig:
+                        start_time += setup_time
+
+                    completion_time = start_time + operation.nominal_processing_time / processing_speed
+
+                    candidate = {
+                        "job": job,
+                        "operation": operation,
+                        "machine": machine,
+                        "start_time": start_time,
+                        "available_time": available_time,
+                        "requires_reconfig": requires_reconfig,
+                        "target_config": target_config,
+                        "setup_time": setup_time,
+                        "completion_time": completion_time,
+                    }
+
+                    if (best_plan is None) or (
+                        completion_time < best_plan["completion_time"]
+                    ):
+                        best_plan = candidate
+
+                if operation.required_capability in current_config.capabilities:
+                    consider_plan(current_config, False, 0.0)
+                    continue
+
+                target_config = next(
+                    (
+                        cfg
+                        for cfg in machine.available_configs
+                        if operation.required_capability in cfg.capabilities
+                    ),
+                    None,
+                )
+
+                if not target_config:
+                    continue
+
+                setup_time = target_config.setup_time_from.get(
+                    current_config.config_id, 0.0
+                )
+                consider_plan(target_config, True, setup_time)
+
+        if not best_plan:
+            # No feasible action right now; try advancing time to the next machine availability
+            next_available = min(m.next_available_time for m in self.env.machines)
+            if next_available > current_time + 1e-6:
+                logger.info(
+                    "Advancing time to %.2f to await machine availability", next_available
+                )
+                self.env.current_time = next_available
+                return self._generate_default_actions(self.env.get_state())
+
+        if not best_plan:
+            logger.warning(
+                "No feasible heuristic action found for %d pending jobs", len(self.env.pending_jobs)
+            )
+            return []
+
+        planned_actions: List[Dict[str, Any]] = []
+
+        if best_plan["requires_reconfig"] and self.env.current_time < best_plan["available_time"]:
+            # Fast-forward the environment clock so the reconfiguration reflects the correct start time
+            self.env.current_time = best_plan["available_time"]
+
+        if best_plan["requires_reconfig"] and (
+            best_plan["target_config"].config_id != best_plan["machine"].current_config.config_id
+        ):
+            planned_actions.append(
+                {
+                    "primitive": "reconfigure_machine",
+                    "parameters": {
+                        "machine_id": best_plan["machine"].machine_id,
+                        "new_config_id": best_plan["target_config"].config_id,
+                    },
+                }
+            )
+
+        planned_actions.append(
+            {
+                "primitive": "assign_operation",
+                "parameters": {
+                    "job_id": best_plan["job"].job_id,
+                    "op_id": best_plan["operation"].op_id,
+                    "machine_id": best_plan["machine"].machine_id,
+                    "start_time": best_plan["start_time"],
+                },
+            }
+        )
+
+        return planned_actions
     
     def get_statistics(self) -> Dict:
         """Get comprehensive statistics"""

@@ -7,8 +7,8 @@ echo "======================================"
 echo "Adaptive MCP-RMS Experimental Framework"
 echo "======================================"
 
-# Set environment variables
-export ANTHROPIC_API_KEY="your-api-key-here"
+# Set environment variables (override as needed)
+# export OLLAMA_BASE_URL="http://localhost:11434"
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
 # Default mode

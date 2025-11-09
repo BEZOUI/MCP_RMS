@@ -19,12 +19,15 @@ mcp_server:
   max_iterations: 50
   objective: "minimize_makespan"
 
-# LLM settings
+# LLM settings (local Ollama)
 llm:
-  model: "claude-sonnet-4-20250514"
-  temperature: 0.3
-  max_tokens: 8192
-  anthropic_api_key: null  # Set via environment variable
+  base_url: "http://localhost:11434"
+  model: "auto"
+  temperature: 0.7
+  max_tokens: 500
+  request_timeout: 60
+  num_ctx: 2048
+  auto_select_model: true
 
 # Memory settings
 memory:
@@ -54,12 +57,21 @@ experiments:
     - "spt"
     - "edd"
     - "mwkr"
+    - "lpt"
+    - "lwkr"
+    - "critical_ratio"
+    - "slack_per_operation"
+    - "random_dispatch"
+    - "apparent_tardiness_cost"
     - "genetic_algorithm"
     - "simulated_annealing"
+    - "simple_dqn"
   
   benchmark_suite: "benchmark_suite"
   
   results_dir: "data/results"
+  simple_dqn_timeout: 900
+  isolate_simple_dqn: true
   
   # Instance sizes to generate
   instance_sizes:

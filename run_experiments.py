@@ -58,26 +58,12 @@ def main():
                        help='Execution mode')
     parser.add_argument('--setup', action='store_true',
                        help='Setup environment first')
-    parser.add_argument('--api-key', type=str,
-                       help='Anthropic API key (or set ANTHROPIC_API_KEY env var)')
-    
     args = parser.parse_args()
-    
+
     # Setup if requested
     if args.setup:
         setup_environment()
-    
-    # Set API key
-    if args.api_key:
-        os.environ['ANTHROPIC_API_KEY'] = args.api_key
-    
-    # Check API key for non-test modes
-    if args.mode != 'quick-test' and 'ANTHROPIC_API_KEY' not in os.environ:
-        print("WARNING: ANTHROPIC_API_KEY not set!")
-        print("Set it with: export ANTHROPIC_API_KEY='your-key' or use --api-key")
-        if 'adaptive_mcp_rms' in ['full', 'run']:
-            print("Adaptive MCP-RMS will be skipped.")
-    
+
     print("=" * 70)
     print("ADAPTIVE MCP-RMS EXPERIMENTAL FRAMEWORK")
     print("=" * 70)
